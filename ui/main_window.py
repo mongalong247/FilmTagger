@@ -1,11 +1,15 @@
-import sys
+# Add QMenuBar to this import line
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QComboBox, QTextEdit, QLineEdit, QListWidget,
-    QSplitter, QGroupBox, QStatusBar, QProgressBar
+    QSplitter, QGroupBox, QStatusBar, QProgressBar, QMenuBar
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction
+
+# Add this new import line to bring in the dialog we just created
+from ui.preset_editor import PresetEditorDialog
+
 
 class MainWindow(QMainWindow):
     """
@@ -37,6 +41,9 @@ class MainWindow(QMainWindow):
 
         # Set initial sizes for the panels (optional, but good for UX)
         self.main_splitter.setSizes([250, 700, 250])
+
+        # --- Create Menu Bar ---
+        self._create_menu_bar()
 
         # --- Create Action Buttons and Status Bar ---
         self._create_status_bar()
@@ -112,6 +119,28 @@ class MainWindow(QMainWindow):
         layout.addStretch() # Pushes widgets to the top
         self.selection_metadata_group.setLayout(layout)
 
+    def _create_menu_bar(self):
+        """Creates the main menu bar for the application."""
+        menu_bar = self.menuBar()
+        
+        # File Menu (we can add actions to it later)
+        file_menu = menu_bar.addMenu("&File")
+        
+        # Edit Menu
+        edit_menu = menu_bar.addMenu("&Edit")
+        manage_presets_action = QAction("Manage Presets...", self)
+        manage_presets_action.triggered.connect(self.open_preset_editor)
+        edit_menu.addAction(manage_presets_action)
+
+    def open_preset_editor(self):
+        """Opens the preset editor dialog."""
+        dialog = PresetEditorDialog(self)
+        # .exec() opens the dialog modally, pausing the main window
+        dialog.exec()
+        # After the dialog is closed, we will reload the presets
+        # into the main window's combo boxes in the next milestone.
+        print("Preset editor was opened and closed.")
+
     def _create_status_bar(self):
         """Creates the status bar at the bottom with action buttons."""
         self.status_bar = QStatusBar()
@@ -129,4 +158,6 @@ class MainWindow(QMainWindow):
         self.status_bar.addPermanentWidget(self.load_button)
         self.status_bar.addPermanentWidget(self.apply_button)
         self.status_bar.addPermanentWidget(self.progress_bar)
+
+
 
