@@ -51,3 +51,4 @@ def save_presets(preset_type: str, data: dict):
     except IOError as e:
         print(f"Error saving {filepath}: {e}")
         return False
+
