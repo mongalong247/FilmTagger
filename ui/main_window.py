@@ -1,4 +1,4 @@
-# Add QMenuBar to this import line
+import sys
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QComboBox, QTextEdit, QLineEdit, QListWidget,
@@ -7,9 +7,8 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction
 
-# Add this new import line to bring in the dialog we just created
+# Import the new preset editor dialog
 from ui.preset_editor import PresetEditorDialog
-
 
 class MainWindow(QMainWindow):
     """
@@ -25,7 +24,6 @@ class MainWindow(QMainWindow):
         self.setGeometry(100, 100, 1200, 700)
 
         # --- Central Widget & Main Layout ---
-        # The main layout will be a horizontal splitter to create the panels.
         self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.setCentralWidget(self.main_splitter)
 
@@ -39,7 +37,7 @@ class MainWindow(QMainWindow):
         self.main_splitter.addWidget(self.filmstrip_group)
         self.main_splitter.addWidget(self.selection_metadata_group)
 
-        # Set initial sizes for the panels (optional, but good for UX)
+        # Set initial sizes for the panels
         self.main_splitter.setSizes([250, 700, 250])
 
         # --- Create Menu Bar ---
@@ -55,39 +53,33 @@ class MainWindow(QMainWindow):
         self.batch_metadata_group = QGroupBox("Batch Metadata (Entire Roll)")
         layout = QVBoxLayout()
 
-        # Camera Body
         layout.addWidget(QLabel("Camera Body:"))
         self.camera_combo = QComboBox()
         self.camera_combo.setDisabled(True)
         self.camera_combo.setToolTip("Select the camera body used for this entire roll.")
         layout.addWidget(self.camera_combo)
 
-        # Film Stock
         layout.addWidget(QLabel("Film Stock:"))
         self.film_stock_combo = QComboBox()
         self.film_stock_combo.setDisabled(True)
         self.film_stock_combo.setToolTip("Select the film stock used.")
         layout.addWidget(self.film_stock_combo)
 
-        # Roll Notes
         layout.addWidget(QLabel("Roll Notes:"))
         self.roll_notes_edit = QTextEdit()
         self.roll_notes_edit.setDisabled(True)
         self.roll_notes_edit.setToolTip("Enter any general notes for this roll of film.")
         layout.addWidget(self.roll_notes_edit)
 
-        layout.addStretch() # Pushes widgets to the top
+        layout.addStretch()
         self.batch_metadata_group.setLayout(layout)
 
     def _create_filmstrip_panel(self):
         """Creates the central panel to display image thumbnails."""
         self.filmstrip_group = QGroupBox("Filmstrip View")
         layout = QVBoxLayout()
-
         self.filmstrip_list = QListWidget()
-        # TODO: Configure view for thumbnails later
         layout.addWidget(self.filmstrip_list)
-
         self.filmstrip_group.setLayout(layout)
 
     def _create_selection_metadata_panel(self):
@@ -95,38 +87,33 @@ class MainWindow(QMainWindow):
         self.selection_metadata_group = QGroupBox("Selection Metadata")
         layout = QVBoxLayout()
 
-        # Lens
         layout.addWidget(QLabel("Lens:"))
         self.lens_combo = QComboBox()
         self.lens_combo.setDisabled(True)
         self.lens_combo.setToolTip("Select the lens used for the selected frame(s).")
         layout.addWidget(self.lens_combo)
 
-        # Aperture
         layout.addWidget(QLabel("Aperture (F-Number):"))
         self.aperture_edit = QLineEdit()
         self.aperture_edit.setDisabled(True)
         self.aperture_edit.setPlaceholderText("e.g., 8 or f/8")
         layout.addWidget(self.aperture_edit)
 
-        # Shutter Speed
         layout.addWidget(QLabel("Shutter Speed:"))
         self.shutter_edit = QLineEdit()
         self.shutter_edit.setDisabled(True)
         self.shutter_edit.setPlaceholderText("e.g., 1/125 or 125")
         layout.addWidget(self.shutter_edit)
 
-        layout.addStretch() # Pushes widgets to the top
+        layout.addStretch()
         self.selection_metadata_group.setLayout(layout)
 
     def _create_menu_bar(self):
         """Creates the main menu bar for the application."""
         menu_bar = self.menuBar()
         
-        # File Menu (we can add actions to it later)
         file_menu = menu_bar.addMenu("&File")
         
-        # Edit Menu
         edit_menu = menu_bar.addMenu("&Edit")
         manage_presets_action = QAction("Manage Presets...", self)
         manage_presets_action.triggered.connect(self.open_preset_editor)
@@ -135,10 +122,9 @@ class MainWindow(QMainWindow):
     def open_preset_editor(self):
         """Opens the preset editor dialog."""
         dialog = PresetEditorDialog(self)
-        # .exec() opens the dialog modally, pausing the main window
         dialog.exec()
-        # After the dialog is closed, we will reload the presets
-        # into the main window's combo boxes in the next milestone.
+        # In the next milestone, we will add code here to refresh the
+        # dropdowns in the main window after presets are changed.
         print("Preset editor was opened and closed.")
 
     def _create_status_bar(self):
@@ -146,18 +132,13 @@ class MainWindow(QMainWindow):
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
 
-        # Action Buttons
         self.load_button = QPushButton("Load Roll...")
         self.apply_button = QPushButton("Apply Changes")
 
-        # Progress Bar
         self.progress_bar = QProgressBar()
-        self.progress_bar.setVisible(False) # Hide it initially
+        self.progress_bar.setVisible(False)
 
-        # Add widgets to the status bar
         self.status_bar.addPermanentWidget(self.load_button)
         self.status_bar.addPermanentWidget(self.apply_button)
         self.status_bar.addPermanentWidget(self.progress_bar)
-
-
 
