@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QComboBox, QTextEdit, QLineEdit, QListWidget, QListWidgetItem,
     QSplitter, QGroupBox, QStatusBar, QProgressBar, QMenuBar, QFileDialog
 )
-from PyQt6.QtCore import Qt, QThread
+from PyQt6.QtCore import Qt, QThread, QSize # <-- ADD QSize HERE
 from PyQt6.QtGui import QAction, QIcon
 
 # Import our new worker and the preset manager
@@ -205,4 +205,5 @@ class MainWindow(QMainWindow):
         self.status_bar.addPermanentWidget(self.load_button)
         self.status_bar.addPermanentWidget(self.apply_button)
         self.status_bar.addPermanentWidget(self.progress_bar)
+
 
