@@ -3,7 +3,8 @@ import sys
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QComboBox, QTextEdit, QLineEdit, QListWidget, QListWidgetItem,
-    QSplitter, QGroupBox, QStatusBar, QProgressBar, QMenuBar, QFileDialog
+    QSplitter, QGroupBox, QStatusBar, QProgressBar, QMenuBar, QFileDialog,
+    QCheckBox
 )
 from PyQt6.QtCore import Qt, QThread, QSize
 from PyQt6.QtGui import QAction, QIcon
@@ -288,10 +289,16 @@ class MainWindow(QMainWindow):
         self.setStatusBar(self.status_bar)
         self.load_button = QPushButton("Load Roll...")
         self.load_button.clicked.connect(self._load_roll)
+
+        self.backup_checkbox = QCheckBox("Create temporary backup")
+        self.backup_checkbox.setChecked(True)
+        self.backup_checkbox.setToolTip("If checked, original files will be backed up before metadata is written.")
+
         self.apply_button = QPushButton("Apply Changes")
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
         self.status_bar.addPermanentWidget(self.load_button)
+        self.status_bar.addPermanentWidget(self.backup_checkbox)
         self.status_bar.addPermanentWidget(self.apply_button)
         self.status_bar.addPermanentWidget(self.progress_bar)
 
