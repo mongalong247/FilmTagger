@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QComboBox, QTextEdit, QLineEdit, QListWidget, QListWidgetItem,
     QSplitter, QGroupBox, QStatusBar, QProgressBar, QMenuBar, QFileDialog
 )
-from PyQt6.QtCore import Qt, QThread, QSize # <-- ADD QSize HERE
+from PyQt6.QtCore import Qt, QThread, QSize
 from PyQt6.QtGui import QAction, QIcon
 
 # Import our new worker and the preset manager
@@ -20,7 +20,6 @@ class MainWindow(QMainWindow):
         self.setGeometry(100, 100, 1200, 700)
         
         # --- Member Variables ---
-        # To keep track of running thumbnail generation threads
         self.thumbnail_threads = [] 
         self.thumbnail_workers = []
 
@@ -32,6 +31,13 @@ class MainWindow(QMainWindow):
         self._create_batch_metadata_panel()
         self._create_filmstrip_panel()
         self._create_selection_metadata_panel()
+        
+        # --- Add Panels to the Splitter ---
+        self.main_splitter.addWidget(self.batch_metadata_group)    # <<< ADDED
+        self.main_splitter.addWidget(self.filmstrip_group)          # <<< ADDED
+        self.main_splitter.addWidget(self.selection_metadata_group) # <<< ADDED
+        
+        # Set initial sizes for the panels
         self.main_splitter.setSizes([250, 700, 250])
 
         # --- Create Menu Bar & Status Bar ---
@@ -39,7 +45,7 @@ class MainWindow(QMainWindow):
         self._create_status_bar()
         
         # --- Final Setup ---
-        self._populate_preset_combos() # Load presets into dropdowns
+        self._populate_preset_combos()
 
         print("Main window UI is ready.")
 
@@ -75,14 +81,12 @@ class MainWindow(QMainWindow):
 
     def _load_roll(self):
         """Opens a dialog to select a folder and loads images into the filmstrip."""
-        # You might want to save/restore the last used directory
         directory = QFileDialog.getExistingDirectory(self, "Select Roll Folder")
         if not directory:
             return
 
         self.filmstrip_list.clear()
         
-        # Find all compatible image files
         supported_extensions = ('.jpg', '.jpeg', '.tif', '.tiff', '.png', '.heic')
         image_files = [os.path.join(directory, f) for f in os.listdir(directory)
                        if f.lower().endswith(supported_extensions)]
@@ -96,11 +100,9 @@ class MainWindow(QMainWindow):
         self.progress_bar.setMaximum(len(image_files))
         self.progress_bar.setValue(0)
         
-        # Clean up any previous threads
         self.thumbnail_threads.clear()
         self.thumbnail_workers.clear()
 
-        # Create a worker and thread for each image
         for image_path in image_files:
             worker = ThumbnailWorker(image_path)
             thread = QThread()
@@ -119,15 +121,12 @@ class MainWindow(QMainWindow):
         if not icon.isNull():
             filename = os.path.basename(image_path)
             item = QListWidgetItem(icon, filename)
-            # Store the full path in the item's data for later use
             item.setData(Qt.ItemDataRole.UserRole, image_path)
             self.filmstrip_list.addItem(item)
             
-        # Update progress
         current_value = self.progress_bar.value() + 1
         self.progress_bar.setValue(current_value)
         
-        # If all images are loaded, hide the progress bar
         if current_value == self.progress_bar.maximum():
             self.status_bar.showMessage("Roll loaded successfully.", 5000)
             self.progress_bar.setVisible(False)
@@ -136,11 +135,10 @@ class MainWindow(QMainWindow):
         """Opens the preset editor and reloads combos when it closes."""
         dialog = PresetEditorDialog(self)
         dialog.exec()
-        # After the dialog is closed, refresh the presets in the main window
         self._populate_preset_combos()
         print("Preset editor was closed. Repopulating dropdowns.")
 
-    # --- UI Creation Methods (Mostly Unchanged) ---
+    # --- UI Creation Methods (Unchanged) ---
     def _create_batch_metadata_panel(self):
         self.batch_metadata_group = QGroupBox("Batch Metadata (Entire Roll)")
         layout = QVBoxLayout()
@@ -160,7 +158,6 @@ class MainWindow(QMainWindow):
         self.filmstrip_group = QGroupBox("Filmstrip View")
         layout = QVBoxLayout()
         self.filmstrip_list = QListWidget()
-        # Configure the list for thumbnails
         self.filmstrip_list.setIconSize(QSize(180, 180))
         self.filmstrip_list.setFlow(QListWidget.Flow.LeftToRight)
         self.filmstrip_list.setWrapping(True)
@@ -198,12 +195,11 @@ class MainWindow(QMainWindow):
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.load_button = QPushButton("Load Roll...")
-        self.load_button.clicked.connect(self._load_roll) # Connect the button
+        self.load_button.clicked.connect(self._load_roll)
         self.apply_button = QPushButton("Apply Changes")
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
         self.status_bar.addPermanentWidget(self.load_button)
         self.status_bar.addPermanentWidget(self.apply_button)
         self.status_bar.addPermanentWidget(self.progress_bar)
-
 
