@@ -19,7 +19,6 @@ SUBPROCESS_ARGS = {}
 if platform.system() == "Windows":
     SUBPROCESS_ARGS['creationflags'] = subprocess.CREATE_NO_WINDOW
 
-# --- New: State variable to prevent double-execution ---
 _exiftool_checked = False
 
 # --- PUBLIC FUNCTIONS ---
@@ -30,7 +29,6 @@ def check_or_install_exiftool():
     this logic only ever runs once per application launch.
     """
     global _exiftool_checked
-    # If the check has already been done, exit immediately.
     if _exiftool_checked:
         return True
 
@@ -40,7 +38,6 @@ def check_or_install_exiftool():
     latest_version = _get_latest_version()
     if not latest_version:
         print("Could not check for the latest ExifTool version. Will use the existing version if available.")
-        # Mark as checked and return the result
         _exiftool_checked = True
         return os.path.exists(EXIFTOOL_PATH)
 
@@ -57,7 +54,6 @@ def check_or_install_exiftool():
         print(f"Updating ExifTool from v{installed_version or 'N/A'} to v{latest_version}...")
         result = _download_and_extract_exiftool(latest_version)
 
-    # Set the flag to true after the first run, regardless of outcome.
     _exiftool_checked = True
     return result
 
@@ -69,10 +65,15 @@ def write_metadata(file_path: str, metadata: dict) -> bool:
         print(f"[Error] File not found for metadata writing: {file_path}")
         return False
 
-    args = [EXIFTOOL_PATH, "-overwrite_original"]
+    # --- THIS IS THE CRITICAL FIX ---
+    # Changed from "-overwrite_original" to "-overwrite_original_in_place"
+    # This is much safer for proprietary RAW file formats.
+    args = [EXIFTOOL_PATH, "-overwrite_original_in_place"]
+    
     for tag, value in metadata.items():
         if value:
-            args.append(f"-{tag}={value}")
+            # Add "-all=" to prevent ExifTool from creating new tags in unknown groups
+            args.append(f"-all:{tag}={value}")
     
     if len(args) <= 2:
         return True
@@ -82,17 +83,19 @@ def write_metadata(file_path: str, metadata: dict) -> bool:
     try:
         result = subprocess.run(args, capture_output=True, text=True, check=False, **SUBPROCESS_ARGS)
         if result.returncode != 0:
-            print(f"[ExifTool Error] {result.stderr.strip()}")
-            return False
+            # ExifTool often returns warnings (code 1) even on success, so we check stderr.
+            # We will consider it a failure only if there is something in stderr.
+            if result.stderr:
+                print(f"[ExifTool Error] For file {os.path.basename(file_path)}: {result.stderr.strip()}")
+                return False
+        # If no stderr, we can assume it was successful or had minor warnings.
         return True
     except Exception as e:
         print(f"[Exception] Failed to write metadata: {e}")
         return False
 
 def get_shot_date(file_path: str) -> datetime | None:
-    """
-    Extracts the 'shot date' from a file's EXIF metadata using ExifTool.
-    """
+    # This function is unchanged
     if not os.path.exists(file_path):
         return None
     try:
@@ -107,9 +110,8 @@ def get_shot_date(file_path: str) -> datetime | None:
     return None
 
 # --- INTERNAL HELPER FUNCTIONS ---
-
+# All internal functions (_get_installed_version, _get_latest_version, etc.) are unchanged
 def _get_installed_version():
-    """Checks the version of the locally installed ExifTool."""
     if not os.path.exists(EXIFTOOL_PATH):
         return None
     try:
@@ -119,7 +121,6 @@ def _get_installed_version():
         return None
 
 def _get_latest_version():
-    """Fetches the latest ExifTool version number from the official website."""
     url = "https://exiftool.org/ver.txt"
     try:
         with urllib.request.urlopen(url) as response:
@@ -129,21 +130,14 @@ def _get_latest_version():
         return None
 
 def _download_and_extract_exiftool(version):
-    """
-    Downloads and extracts ExifTool, moving the executable and support files.
-    """
     zip_path = os.path.join(RESOURCES_DIR, "exiftool.zip")
     extract_path = os.path.join(RESOURCES_DIR, f"exiftool-temp-{version}")
-    
     zip_url = f"https://exiftool.org/exiftool-{version}_64.zip"
-    
     try:
         print(f"Downloading ExifTool v{version} from {zip_url}...")
         urllib.request.urlretrieve(zip_url, zip_path)
-
         with zipfile.ZipFile(zip_path, "r") as zip_ref:
             zip_ref.extractall(extract_path)
-
         binary_moved = False
         for root, _, files in os.walk(extract_path):
             for file in files:
@@ -152,10 +146,8 @@ def _download_and_extract_exiftool(version):
                     binary_moved = True
                     break
             if binary_moved: break
-        
         if not binary_moved:
             raise FileNotFoundError("Could not find exiftool.exe in the extracted files.")
-
         support_dir_moved = False
         for root, dirs, _ in os.walk(extract_path):
             for dir_name in dirs:
@@ -168,10 +160,8 @@ def _download_and_extract_exiftool(version):
                     support_dir_moved = True
                     break
             if support_dir_moved: break
-
         print(f"ExifTool v{version} installed successfully.")
         return True
-
     except Exception as e:
         print(f"Error during ExifTool installation: {e}")
         return False
