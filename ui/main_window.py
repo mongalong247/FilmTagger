@@ -17,6 +17,7 @@ from ui.workers import ThumbnailWorker, ExifWriteWorker
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        # ... (rest of __init__ is unchanged) ...
         self.setWindowTitle("Film Tagger")
         self.setGeometry(100, 100, 1200, 700)
         
@@ -44,6 +45,7 @@ class MainWindow(QMainWindow):
         self._populate_preset_combos()
         self._connect_signals()
 
+    # ... (all other methods are unchanged until _load_roll) ...
     def _connect_signals(self):
         self.filmstrip_list.itemSelectionChanged.connect(self._on_filmstrip_selection_changed)
         self.camera_combo.currentIndexChanged.connect(self._on_batch_camera_changed)
@@ -52,10 +54,8 @@ class MainWindow(QMainWindow):
         self.lens_combo.currentIndexChanged.connect(self._on_selection_lens_changed)
         self.aperture_edit.textChanged.connect(self._on_selection_aperture_changed)
         self.shutter_edit.textChanged.connect(self._on_selection_shutter_changed)
-        # NEW: Connect the apply button
         self.apply_button.clicked.connect(self._apply_changes)
 
-    # --- NEW: Processing Logic ---
     def _apply_changes(self):
         """Prepares and starts the EXIF writing process."""
         if not self.image_data:
@@ -69,13 +69,11 @@ class MainWindow(QMainWindow):
         if reply == QMessageBox.StandardButton.No:
             return
             
-        # Prepare the task list by gathering all data
         tasks = self._prepare_task_list()
         if not tasks:
             QMessageBox.critical(self, "Error", "Could not prepare data for writing. Please check your presets.")
             return
 
-        # Disable UI and start worker
         self._set_ui_enabled(False)
         self.status_bar.showMessage("Applying changes...")
         self.progress_bar.setVisible(True)
@@ -93,12 +91,7 @@ class MainWindow(QMainWindow):
         self.write_thread.start()
 
     def _prepare_task_list(self) -> list:
-        """
-        Gathers all metadata from the UI and data model and prepares a list of tasks
-        for the ExifWriteWorker.
-        """
         tasks = []
-        # Load all presets once to be efficient
         all_presets = {
             'cameras': preset_manager.load_presets('cameras'),
             'lenses': preset_manager.load_presets('lenses'),
@@ -107,44 +100,31 @@ class MainWindow(QMainWindow):
 
         for path, data in self.image_data.items():
             final_exif = {}
-
-            # 1. Get full preset data
             camera_name = data.get('Camera')
             if camera_name and camera_name in all_presets['cameras']:
                 final_exif.update(all_presets['cameras'][camera_name])
-
             film_name = data.get('FilmStock')
             if film_name and film_name in all_presets['film_stocks']:
                 final_exif.update(all_presets['film_stocks'][film_name])
-
             lens_name = data.get('Lens')
             if lens_name and lens_name in all_presets['lenses']:
                 final_exif.update(all_presets['lenses'][lens_name])
             
-            # 2. Map UI fields to EXIF tags and overwrite
-            if data.get('Aperture'):
-                final_exif['FNumber'] = data['Aperture']
-            if data.get('ShutterSpeed'):
-                final_exif['ShutterSpeedValue'] = data['ShutterSpeed']
-            if data.get('RollNotes'):
-                final_exif['ImageDescription'] = data['RollNotes']
+            if data.get('Aperture'): final_exif['FNumber'] = data['Aperture']
+            if data.get('ShutterSpeed'): final_exif['ShutterSpeedValue'] = data['ShutterSpeed']
+            if data.get('RollNotes'): final_exif['ImageDescription'] = data['RollNotes']
             
-            # 3. Clean up empty values
             final_exif_cleaned = {k: v for k, v in final_exif.items() if v}
             tasks.append((path, final_exif_cleaned))
-        
         return tasks
 
     def _on_apply_finished(self, success: bool, message: str):
-        """Handles the completion of the EXIF writing process."""
         self.progress_bar.setVisible(False)
         self.status_bar.showMessage("Ready.")
         
         if success:
             backup_path = message
             QMessageBox.information(self, "Success", "Metadata applied to all files successfully.")
-            
-            # Ask to delete backup if it was created
             if self.backup_checkbox.isChecked() and os.path.exists(backup_path):
                 reply = QMessageBox.question(self, "Delete Backup",
                                              f"Do you want to delete the temporary backup folder?\n\n{backup_path}",
@@ -156,8 +136,7 @@ class MainWindow(QMainWindow):
                         self.status_bar.showMessage("Temporary backup deleted.", 5000)
                     except Exception as e:
                         QMessageBox.warning(self, "Error", f"Could not delete backup folder: {e}")
-
-        else: # On failure
+        else:
             QMessageBox.critical(self, "Process Failed", message)
 
         self._set_ui_enabled(True)
@@ -165,14 +144,12 @@ class MainWindow(QMainWindow):
         self.write_thread.wait()
 
     def _set_ui_enabled(self, enabled: bool):
-        """Enables or disables the entire UI during processing."""
         self.main_splitter.setEnabled(enabled)
         self.menuBar().setEnabled(enabled)
         self.load_button.setEnabled(enabled)
         self.apply_button.setEnabled(enabled)
         self.backup_checkbox.setEnabled(enabled)
 
-    # --- Other methods from here on are mostly unchanged ---
     def _on_batch_camera_changed(self, index):
         if self._is_updating_ui: return
         camera_name = self.camera_combo.itemText(index)
@@ -234,18 +211,27 @@ class MainWindow(QMainWindow):
         if not directory: return
         self.filmstrip_list.clear()
         self.image_data.clear()
-        supported_extensions = ('.jpg', '.jpeg', '.tif', '.tiff', '.png', '.heic')
+        
+        # --- THIS IS THE ONLY CHANGE ---
+        # Added common RAW formats and DNG to the list of supported file types.
+        supported_extensions = ('.jpg', '.jpeg', '.tif', '.tiff', '.png', '.heic', '.dng', '.cr2', '.nef', '.arw', '.rw2')
+        
         image_files = [os.path.join(directory, f) for f in os.listdir(directory) if f.lower().endswith(supported_extensions)]
+        
         if not image_files:
             self.status_bar.showMessage("No compatible image files found.", 5000)
             return
+            
         for path in image_files: self.image_data[path] = {}
+        
         self.status_bar.showMessage(f"Loading {len(image_files)} images...")
         self.progress_bar.setVisible(True)
         self.progress_bar.setMaximum(len(image_files))
         self.progress_bar.setValue(0)
+        
         self.thumbnail_threads.clear()
         self.thumbnail_workers.clear()
+        
         for image_path in image_files:
             worker = ThumbnailWorker(image_path)
             thread = QThread()
@@ -276,19 +262,12 @@ class MainWindow(QMainWindow):
         self._populate_preset_combos()
 
     def _populate_preset_combos(self):
-        # This function remains unchanged
-        self.camera_combo.clear()
-        self.camera_combo.addItem("--- Select Camera ---")
-        cameras = preset_manager.load_presets('cameras')
-        self.camera_combo.addItems(sorted(cameras.keys()))
-        self.film_stock_combo.clear()
-        self.film_stock_combo.addItem("--- Select Film Stock ---")
-        film_stocks = preset_manager.load_presets('film_stocks')
-        self.film_stock_combo.addItems(sorted(film_stocks.keys()))
-        self.lens_combo.clear()
-        self.lens_combo.addItem("--- Select Lens ---")
-        lenses = preset_manager.load_presets('lenses')
-        self.lens_combo.addItems(sorted(lenses.keys()))
+        self.camera_combo.clear(); self.camera_combo.addItem("--- Select Camera ---")
+        self.camera_combo.addItems(sorted(preset_manager.load_presets('cameras').keys()))
+        self.film_stock_combo.clear(); self.film_stock_combo.addItem("--- Select Film Stock ---")
+        self.film_stock_combo.addItems(sorted(preset_manager.load_presets('film_stocks').keys()))
+        self.lens_combo.clear(); self.lens_combo.addItem("--- Select Lens ---")
+        self.lens_combo.addItems(sorted(preset_manager.load_presets('lenses').keys()))
         self.camera_combo.setEnabled(True)
         self.film_stock_combo.setEnabled(True)
         self.roll_notes_edit.setEnabled(True)
@@ -297,7 +276,6 @@ class MainWindow(QMainWindow):
         self.shutter_edit.setEnabled(True)
 
     def _create_batch_metadata_panel(self):
-        # This function remains unchanged
         self.batch_metadata_group = QGroupBox("Batch Metadata (Entire Roll)")
         layout = QVBoxLayout()
         layout.addWidget(QLabel("Camera Body:"))
@@ -313,7 +291,6 @@ class MainWindow(QMainWindow):
         self.batch_metadata_group.setLayout(layout)
 
     def _create_filmstrip_panel(self):
-        # This function remains unchanged
         self.filmstrip_group = QGroupBox("Filmstrip View")
         layout = QVBoxLayout()
         self.filmstrip_list = QListWidget()
@@ -326,7 +303,6 @@ class MainWindow(QMainWindow):
         self.filmstrip_group.setLayout(layout)
 
     def _create_selection_metadata_panel(self):
-        # This function remains unchanged
         self.selection_metadata_group = QGroupBox("Selection Metadata")
         layout = QVBoxLayout()
         layout.addWidget(QLabel("Lens:"))
@@ -344,7 +320,6 @@ class MainWindow(QMainWindow):
         self.selection_metadata_group.setLayout(layout)
 
     def _create_menu_bar(self):
-        # This function remains unchanged
         menu_bar = self.menuBar()
         file_menu = menu_bar.addMenu("&File")
         edit_menu = menu_bar.addMenu("&Edit")
@@ -353,7 +328,6 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(manage_presets_action)
 
     def _create_status_bar(self):
-        # This function remains unchanged
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.load_button = QPushButton("Load Roll...")
