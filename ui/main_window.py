@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
     QCheckBox
 )
 from PyQt6.QtCore import Qt, QThread, QSize
-from PyQt6.QtGui import QAction, QIcon
+from PyQt6.QtGui import QAction, QIcon, QPainter, QColor, QPixmap
 
 import preset_manager
 from ui.preset_editor import PresetEditorDialog
@@ -45,7 +45,7 @@ class MainWindow(QMainWindow):
         self._populate_preset_combos()
         self._connect_signals()
 
-    # ... (all other methods are unchanged until _load_roll) ...
+    # ... (all other methods are unchanged until _add_thumbnail_to_filmstrip) ...
     def _connect_signals(self):
         self.filmstrip_list.itemSelectionChanged.connect(self._on_filmstrip_selection_changed)
         self.camera_combo.currentIndexChanged.connect(self._on_batch_camera_changed)
@@ -57,36 +57,28 @@ class MainWindow(QMainWindow):
         self.apply_button.clicked.connect(self._apply_changes)
 
     def _apply_changes(self):
-        """Prepares and starts the EXIF writing process."""
         if not self.image_data:
             QMessageBox.warning(self, "No Images Loaded", "Please load a roll of film before applying changes.")
             return
-
         reply = QMessageBox.question(self, "Confirm Changes", 
                                      f"You are about to write metadata to {len(self.image_data)} files. Are you sure you want to proceed?",
                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                                      QMessageBox.StandardButton.No)
-        if reply == QMessageBox.StandardButton.No:
-            return
-            
+        if reply == QMessageBox.StandardButton.No: return
         tasks = self._prepare_task_list()
         if not tasks:
             QMessageBox.critical(self, "Error", "Could not prepare data for writing. Please check your presets.")
             return
-
         self._set_ui_enabled(False)
         self.status_bar.showMessage("Applying changes...")
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
-        
         backup_enabled = self.backup_checkbox.isChecked()
         self.write_worker = ExifWriteWorker(tasks, backup_enabled)
         self.write_thread = QThread()
         self.write_worker.moveToThread(self.write_thread)
-        
         self.write_worker.progress.connect(lambda val, msg: self.progress_bar.setValue(val) and self.status_bar.showMessage(msg))
         self.write_worker.finished.connect(self._on_apply_finished)
-        
         self.write_thread.started.connect(self.write_worker.run)
         self.write_thread.start()
 
@@ -97,23 +89,17 @@ class MainWindow(QMainWindow):
             'lenses': preset_manager.load_presets('lenses'),
             'film_stocks': preset_manager.load_presets('film_stocks')
         }
-
         for path, data in self.image_data.items():
             final_exif = {}
             camera_name = data.get('Camera')
-            if camera_name and camera_name in all_presets['cameras']:
-                final_exif.update(all_presets['cameras'][camera_name])
+            if camera_name and camera_name in all_presets['cameras']: final_exif.update(all_presets['cameras'][camera_name])
             film_name = data.get('FilmStock')
-            if film_name and film_name in all_presets['film_stocks']:
-                final_exif.update(all_presets['film_stocks'][film_name])
+            if film_name and film_name in all_presets['film_stocks']: final_exif.update(all_presets['film_stocks'][film_name])
             lens_name = data.get('Lens')
-            if lens_name and lens_name in all_presets['lenses']:
-                final_exif.update(all_presets['lenses'][lens_name])
-            
+            if lens_name and lens_name in all_presets['lenses']: final_exif.update(all_presets['lenses'][lens_name])
             if data.get('Aperture'): final_exif['FNumber'] = data['Aperture']
             if data.get('ShutterSpeed'): final_exif['ShutterSpeedValue'] = data['ShutterSpeed']
             if data.get('RollNotes'): final_exif['ImageDescription'] = data['RollNotes']
-            
             final_exif_cleaned = {k: v for k, v in final_exif.items() if v}
             tasks.append((path, final_exif_cleaned))
         return tasks
@@ -121,7 +107,6 @@ class MainWindow(QMainWindow):
     def _on_apply_finished(self, success: bool, message: str):
         self.progress_bar.setVisible(False)
         self.status_bar.showMessage("Ready.")
-        
         if success:
             backup_path = message
             QMessageBox.information(self, "Success", "Metadata applied to all files successfully.")
@@ -138,7 +123,6 @@ class MainWindow(QMainWindow):
                         QMessageBox.warning(self, "Error", f"Could not delete backup folder: {e}")
         else:
             QMessageBox.critical(self, "Process Failed", message)
-
         self._set_ui_enabled(True)
         self.write_thread.quit()
         self.write_thread.wait()
@@ -211,27 +195,18 @@ class MainWindow(QMainWindow):
         if not directory: return
         self.filmstrip_list.clear()
         self.image_data.clear()
-        
-        # --- THIS IS THE ONLY CHANGE ---
-        # Added common RAW formats and DNG to the list of supported file types.
         supported_extensions = ('.jpg', '.jpeg', '.tif', '.tiff', '.png', '.heic', '.dng', '.cr2', '.nef', '.arw', '.rw2')
-        
         image_files = [os.path.join(directory, f) for f in os.listdir(directory) if f.lower().endswith(supported_extensions)]
-        
         if not image_files:
             self.status_bar.showMessage("No compatible image files found.", 5000)
             return
-            
         for path in image_files: self.image_data[path] = {}
-        
         self.status_bar.showMessage(f"Loading {len(image_files)} images...")
         self.progress_bar.setVisible(True)
         self.progress_bar.setMaximum(len(image_files))
         self.progress_bar.setValue(0)
-        
         self.thumbnail_threads.clear()
         self.thumbnail_workers.clear()
-        
         for image_path in image_files:
             worker = ThumbnailWorker(image_path)
             thread = QThread()
@@ -242,12 +217,40 @@ class MainWindow(QMainWindow):
             thread.started.connect(worker.run)
             thread.start()
 
+    def _create_placeholder_icon(self) -> QIcon:
+        """Creates a generic grey placeholder icon for failed thumbnails."""
+        size = self.filmstrip_list.iconSize()
+        pixmap = QPixmap(size)
+        pixmap.fill(QColor("lightgray"))
+
+        # Optional: Draw a "No Preview" text on the pixmap
+        painter = QPainter(pixmap)
+        painter.setPen(QColor("black"))
+        # The Qt.TextFlagWordWrap flag helps wrap text if the filename is long
+        painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap, "No Preview")
+        painter.end()
+
+        return QIcon(pixmap)
+
     def _add_thumbnail_to_filmstrip(self, image_path, icon):
-        if not icon.isNull():
-            filename = os.path.basename(image_path)
+        """
+        Adds an item to the filmstrip. If the icon is invalid,
+        it creates a placeholder.
+        """
+        filename = os.path.basename(image_path)
+
+        # If the icon from the worker is null (i.e., failed), create a placeholder
+        if icon.isNull():
+            final_icon = self._create_placeholder_icon()
+            item = QListWidgetItem(final_icon, filename)
+        else:
             item = QListWidgetItem(icon, filename)
-            item.setData(Qt.ItemDataRole.UserRole, image_path)
-            self.filmstrip_list.addItem(item)
+        
+        # We always add the item, whether it has a real thumbnail or a placeholder
+        item.setData(Qt.ItemDataRole.UserRole, image_path)
+        self.filmstrip_list.addItem(item)
+        
+        # Update progress
         current_value = self.progress_bar.value() + 1
         self.progress_bar.setValue(current_value)
         if current_value == self.progress_bar.maximum():
@@ -257,11 +260,13 @@ class MainWindow(QMainWindow):
             self._on_batch_film_stock_changed(self.film_stock_combo.currentIndex())
 
     def open_preset_editor(self):
+        # This method is unchanged
         dialog = PresetEditorDialog(self)
         dialog.exec()
         self._populate_preset_combos()
 
     def _populate_preset_combos(self):
+        # This method is unchanged
         self.camera_combo.clear(); self.camera_combo.addItem("--- Select Camera ---")
         self.camera_combo.addItems(sorted(preset_manager.load_presets('cameras').keys()))
         self.film_stock_combo.clear(); self.film_stock_combo.addItem("--- Select Film Stock ---")
@@ -276,6 +281,7 @@ class MainWindow(QMainWindow):
         self.shutter_edit.setEnabled(True)
 
     def _create_batch_metadata_panel(self):
+        # This method is unchanged
         self.batch_metadata_group = QGroupBox("Batch Metadata (Entire Roll)")
         layout = QVBoxLayout()
         layout.addWidget(QLabel("Camera Body:"))
@@ -291,6 +297,7 @@ class MainWindow(QMainWindow):
         self.batch_metadata_group.setLayout(layout)
 
     def _create_filmstrip_panel(self):
+        # This method is unchanged
         self.filmstrip_group = QGroupBox("Filmstrip View")
         layout = QVBoxLayout()
         self.filmstrip_list = QListWidget()
@@ -303,6 +310,7 @@ class MainWindow(QMainWindow):
         self.filmstrip_group.setLayout(layout)
 
     def _create_selection_metadata_panel(self):
+        # This method is unchanged
         self.selection_metadata_group = QGroupBox("Selection Metadata")
         layout = QVBoxLayout()
         layout.addWidget(QLabel("Lens:"))
@@ -320,6 +328,7 @@ class MainWindow(QMainWindow):
         self.selection_metadata_group.setLayout(layout)
 
     def _create_menu_bar(self):
+        # This method is unchanged
         menu_bar = self.menuBar()
         file_menu = menu_bar.addMenu("&File")
         edit_menu = menu_bar.addMenu("&Edit")
@@ -328,6 +337,7 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(manage_presets_action)
 
     def _create_status_bar(self):
+        # This method is unchanged
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.load_button = QPushButton("Load Roll...")
