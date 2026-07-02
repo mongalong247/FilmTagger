@@ -1,0 +1,529 @@
+import os
+import shutil
+
+from PySide6.QtWidgets import (
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QMessageBox,
+    QPushButton, QComboBox, QTextEdit, QLineEdit, QListWidget, QListWidgetItem,
+    QSplitter, QGroupBox, QStatusBar, QProgressBar, QFileDialog, QCheckBox
+)
+from PySide6.QtCore import Qt, QThread, QThreadPool, QSize, QSettings
+from PySide6.QtGui import QAction, QIcon, QPainter, QColor, QPixmap
+
+import preset_manager
+import exiftool_manager
+from preset_editor import PresetEditorDialog
+from workers import ThumbnailTask, ExifWriteWorker
+
+APP_VERSION = "0.1.0"
+NORMAL_STYLE = "color: gray; font-style: italic;"
+OK_STYLE = "color: #2e7d32;"
+WARNING_STYLE = "color: #b26a00; font-weight: bold;"
+
+# Kept in sync by hand with ImageImporter's IMAGE_EXTENSIONS list (app.py).
+# If that list grows, mirror the change here.
+IMAGE_EXTENSIONS = (
+    '.jpg', '.jpeg', '.png', '.heic', '.heif', '.tif', '.tiff',
+    '.cr2', '.cr3', '.nef', '.arw', '.dng', '.rw2',
+    '.orf', '.raf', '.pef', '.srw', '.rwl', '.3fr', '.raw',
+)
+
+SETTINGS_ORG = "PhotoTagger"
+SETTINGS_APP = "FilmTagger"
+
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Film Tagger")
+        self.setGeometry(100, 100, 1200, 700)
+
+        self.settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
+
+        self.threadpool = QThreadPool.globalInstance()
+        self._load_generation = 0  # bumped on every _load_roll call; used to
+                                    # discard thumbnail results from a roll
+                                    # that's since been superseded
+        self.write_thread = None
+        self.write_worker = None
+        self.image_data = {}
+        self._is_updating_ui = False
+        self.exiftool_available = False
+
+        self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.setCentralWidget(self.main_splitter)
+
+        self._create_batch_metadata_panel()
+        self._create_filmstrip_panel()
+        self._create_selection_metadata_panel()
+        self.main_splitter.addWidget(self.batch_metadata_group)
+        self.main_splitter.addWidget(self.filmstrip_group)
+        self.main_splitter.addWidget(self.selection_metadata_group)
+        self.main_splitter.setSizes([260, 680, 260])
+
+        self._create_menu_bar()
+        self._create_status_bar()
+
+        self._populate_preset_combos()
+        self._connect_signals()
+        self._load_last_source_folder()
+        self._refresh_exiftool_status()
+
+    # --- Signal wiring ---
+
+    def _connect_signals(self):
+        self.filmstrip_list.itemSelectionChanged.connect(self._on_filmstrip_selection_changed)
+        self.camera_combo.currentIndexChanged.connect(self._on_batch_camera_changed)
+        self.film_stock_combo.currentIndexChanged.connect(self._on_batch_film_stock_changed)
+        self.iso_edit.textChanged.connect(self._on_batch_iso_changed)
+        self.roll_notes_edit.textChanged.connect(self._on_batch_notes_changed)
+        self.lens_combo.currentIndexChanged.connect(self._on_selection_lens_changed)
+        self.aperture_edit.textChanged.connect(self._on_selection_aperture_changed)
+        self.shutter_edit.textChanged.connect(self._on_selection_shutter_changed)
+        self.apply_button.clicked.connect(self._apply_changes)
+
+    # --- Applying metadata ---
+
+    def _apply_changes(self):
+        if not self.image_data:
+            QMessageBox.warning(self, "No Images Loaded", "Please load a roll of film before applying changes.")
+            return
+        if not self.exiftool_available:
+            QMessageBox.warning(self, "ExifTool Unavailable",
+                                 "ExifTool isn't available, so metadata can't be written. "
+                                 "Check Settings > Set ExifTool Path...")
+            return
+        reply = QMessageBox.question(self, "Confirm Changes",
+                                     f"You are about to write metadata to {len(self.image_data)} files. Are you sure you want to proceed?",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                     QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.No:
+            return
+        tasks = self._prepare_task_list()
+        if not tasks:
+            QMessageBox.critical(self, "Error", "Could not prepare data for writing. Please check your presets.")
+            return
+        self._set_ui_enabled(False)
+        self.status_bar.showMessage("Applying changes...")
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(0)
+        backup_enabled = self.backup_checkbox.isChecked()
+        self.write_worker = ExifWriteWorker(tasks, backup_enabled)
+        self.write_thread = QThread()
+        self.write_worker.moveToThread(self.write_thread)
+        self.write_worker.progress.connect(self._on_write_progress)
+        self.write_worker.finished.connect(self._on_apply_finished)
+        self.write_thread.started.connect(self.write_worker.run)
+        self.write_thread.start()
+
+    def _on_write_progress(self, value: int, message: str):
+        self.progress_bar.setValue(value)
+        self.status_bar.showMessage(message)
+
+    def _prepare_task_list(self) -> list:
+        tasks = []
+        all_presets = {
+            'cameras': preset_manager.load_presets('cameras'),
+            'lenses': preset_manager.load_presets('lenses'),
+        }
+        for path, data in self.image_data.items():
+            final_exif = {}
+
+            camera_name = data.get('Camera')
+            if camera_name and camera_name in all_presets['cameras']:
+                final_exif.update(all_presets['cameras'][camera_name])
+
+            lens_name = data.get('Lens')
+            if lens_name and lens_name in all_presets['lenses']:
+                final_exif.update(all_presets['lenses'][lens_name])
+
+            if data.get('Aperture'):
+                final_exif['FNumber'] = data['Aperture']
+            if data.get('ShutterSpeed'):
+                final_exif['ShutterSpeedValue'] = data['ShutterSpeed']
+            if data.get('RollNotes'):
+                final_exif['ImageDescription'] = data['RollNotes']
+            if data.get('ISO'):
+                final_exif['ISO'] = data['ISO']
+            if data.get('FilmStock'):
+                # Film stock has no standard EXIF tag. Written as a
+                # fully-qualified XMP tag so exiftool_manager writes it
+                # verbatim as a searchable keyword/subject rather than a
+                # caption.
+                final_exif['XMP-dc:Subject'] = data['FilmStock']
+
+            final_exif_cleaned = {k: v for k, v in final_exif.items() if v}
+            tasks.append((path, final_exif_cleaned))
+        return tasks
+
+    def _on_apply_finished(self, success: bool, message: str):
+        self.progress_bar.setVisible(False)
+        self.status_bar.showMessage("Ready.")
+        if success:
+            backup_path = message
+            QMessageBox.information(self, "Success", "Metadata applied to all files successfully.")
+            if self.backup_checkbox.isChecked() and backup_path and os.path.exists(backup_path):
+                reply = QMessageBox.question(self, "Delete Backup",
+                                             f"Do you want to delete the temporary backup folder?\n\n{backup_path}",
+                                             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                             QMessageBox.StandardButton.Yes)
+                if reply == QMessageBox.StandardButton.Yes:
+                    try:
+                        shutil.rmtree(backup_path)
+                        self.status_bar.showMessage("Temporary backup deleted.", 5000)
+                    except Exception as e:
+                        QMessageBox.warning(self, "Error", f"Could not delete backup folder: {e}")
+        else:
+            QMessageBox.critical(self, "Process Failed", message)
+        self._set_ui_enabled(True)
+        if self.write_thread:
+            self.write_thread.quit()
+            self.write_thread.wait()
+        self.write_thread = None
+        self.write_worker = None
+
+    def _set_ui_enabled(self, enabled: bool):
+        self.main_splitter.setEnabled(enabled)
+        self.menuBar().setEnabled(enabled)
+        self.load_button.setEnabled(enabled)
+        self.apply_button.setEnabled(enabled and self.exiftool_available)
+        self.backup_checkbox.setEnabled(enabled)
+
+    # --- Batch panel handlers ---
+
+    def _on_batch_camera_changed(self, index):
+        if self._is_updating_ui:
+            return
+        camera_name = self.camera_combo.itemText(index)
+        for path in self.image_data:
+            self.image_data[path]['Camera'] = camera_name
+
+    def _on_batch_film_stock_changed(self, index):
+        if self._is_updating_ui:
+            return
+        film_name = self.film_stock_combo.itemText(index)
+        for path in self.image_data:
+            self.image_data[path]['FilmStock'] = film_name
+
+        # Pre-fill ISO from the film stock's box speed. Left editable so a
+        # pushed/pulled roll can be overridden without touching the preset.
+        film_presets = preset_manager.load_presets('film_stocks')
+        default_iso = film_presets.get(film_name, {}).get('ISO', '')
+        self.iso_edit.setText(default_iso)
+
+    def _on_batch_iso_changed(self, text):
+        if self._is_updating_ui:
+            return
+        for path in self.image_data:
+            self.image_data[path]['ISO'] = text
+
+    def _on_batch_notes_changed(self):
+        if self._is_updating_ui:
+            return
+        notes = self.roll_notes_edit.toPlainText()
+        for path in self.image_data:
+            self.image_data[path]['RollNotes'] = notes
+
+    # --- Selection panel handlers ---
+
+    def _on_selection_lens_changed(self, index):
+        if self._is_updating_ui:
+            return
+        lens_name = self.lens_combo.itemText(index)
+        for item in self.filmstrip_list.selectedItems():
+            path = item.data(Qt.ItemDataRole.UserRole)
+            if path in self.image_data:
+                self.image_data[path]['Lens'] = lens_name
+
+    def _on_selection_aperture_changed(self, text):
+        if self._is_updating_ui:
+            return
+        for item in self.filmstrip_list.selectedItems():
+            path = item.data(Qt.ItemDataRole.UserRole)
+            if path in self.image_data:
+                self.image_data[path]['Aperture'] = text
+
+    def _on_selection_shutter_changed(self, text):
+        if self._is_updating_ui:
+            return
+        for item in self.filmstrip_list.selectedItems():
+            path = item.data(Qt.ItemDataRole.UserRole)
+            if path in self.image_data:
+                self.image_data[path]['ShutterSpeed'] = text
+
+    def _on_filmstrip_selection_changed(self):
+        self._is_updating_ui = True
+        selected_items = self.filmstrip_list.selectedItems()
+        if not selected_items:
+            self.lens_combo.setCurrentIndex(0)
+            self.aperture_edit.clear()
+            self.shutter_edit.clear()
+        elif len(selected_items) == 1:
+            item = selected_items[0]
+            path = item.data(Qt.ItemDataRole.UserRole)
+            data = self.image_data.get(path, {})
+            self.lens_combo.setCurrentText(data.get('Lens', '--- Select Lens ---'))
+            self.aperture_edit.setText(data.get('Aperture', ''))
+            self.shutter_edit.setText(data.get('ShutterSpeed', ''))
+        else:
+            self.lens_combo.setCurrentIndex(0)
+            self.aperture_edit.setPlaceholderText("Multiple Values")
+            self.aperture_edit.clear()
+            self.shutter_edit.setPlaceholderText("Multiple Values")
+            self.shutter_edit.clear()
+        self._is_updating_ui = False
+
+    # --- Loading a roll ---
+
+    def _load_roll(self):
+        start_dir = self.settings.value("lastSourceFolder", "")
+        directory = QFileDialog.getExistingDirectory(self, "Select Roll Folder", start_dir)
+        if not directory:
+            return
+
+        self.settings.setValue("lastSourceFolder", directory)
+        self.filmstrip_list.clear()
+        self.image_data.clear()
+        self._load_generation += 1
+        generation = self._load_generation
+
+        image_files = [
+            os.path.join(directory, f) for f in os.listdir(directory)
+            if f.lower().endswith(IMAGE_EXTENSIONS)
+        ]
+        if not image_files:
+            self.status_bar.showMessage("No compatible image files found.", 5000)
+            return
+
+        for path in image_files:
+            self.image_data[path] = {}
+
+        self.status_bar.showMessage(f"Loading {len(image_files)} images...")
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setMaximum(len(image_files))
+        self.progress_bar.setValue(0)
+
+        for image_path in image_files:
+            task = ThumbnailTask(image_path, generation=generation)
+            task.signals.finished.connect(self._add_thumbnail_to_filmstrip)
+            self.threadpool.start(task)
+
+    def _create_placeholder_icon(self) -> QIcon:
+        """Creates a generic grey placeholder icon for failed thumbnails."""
+        size = self.filmstrip_list.iconSize()
+        pixmap = QPixmap(size)
+        pixmap.fill(QColor("lightgray"))
+
+        painter = QPainter(pixmap)
+        painter.setPen(QColor("black"))
+        painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap, "No Preview")
+        painter.end()
+
+        return QIcon(pixmap)
+
+    def _add_thumbnail_to_filmstrip(self, image_path, icon, generation):
+        # Discard results from a roll load that's since been superseded by
+        # a newer one, so a slow thumbnail from the previous folder can't
+        # land in the currently-displayed filmstrip.
+        if generation != self._load_generation:
+            return
+
+        filename = os.path.basename(image_path)
+
+        if icon.isNull():
+            final_icon = self._create_placeholder_icon()
+            item = QListWidgetItem(final_icon, filename)
+        else:
+            item = QListWidgetItem(icon, filename)
+
+        item.setData(Qt.ItemDataRole.UserRole, image_path)
+        self.filmstrip_list.addItem(item)
+
+        current_value = self.progress_bar.value() + 1
+        self.progress_bar.setValue(current_value)
+        if current_value == self.progress_bar.maximum():
+            self.status_bar.showMessage("Roll loaded successfully.", 5000)
+            self.progress_bar.setVisible(False)
+            self._on_batch_camera_changed(self.camera_combo.currentIndex())
+            self._on_batch_film_stock_changed(self.film_stock_combo.currentIndex())
+
+    def _load_last_source_folder(self):
+        """Just restores the file-dialog starting point; doesn't auto-load images."""
+        pass
+
+    # --- Presets ---
+
+    def open_preset_editor(self):
+        dialog = PresetEditorDialog(self)
+        dialog.exec()
+        self._populate_preset_combos()
+
+    def _populate_preset_combos(self):
+        self.camera_combo.clear()
+        self.camera_combo.addItem("--- Select Camera ---")
+        self.camera_combo.addItems(sorted(preset_manager.load_presets('cameras').keys()))
+        self.film_stock_combo.clear()
+        self.film_stock_combo.addItem("--- Select Film Stock ---")
+        self.film_stock_combo.addItems(sorted(preset_manager.load_presets('film_stocks').keys()))
+        self.lens_combo.clear()
+        self.lens_combo.addItem("--- Select Lens ---")
+        self.lens_combo.addItems(sorted(preset_manager.load_presets('lenses').keys()))
+        self.camera_combo.setEnabled(True)
+        self.film_stock_combo.setEnabled(True)
+        self.iso_edit.setEnabled(True)
+        self.roll_notes_edit.setEnabled(True)
+        self.lens_combo.setEnabled(True)
+        self.aperture_edit.setEnabled(True)
+        self.shutter_edit.setEnabled(True)
+
+    # --- ExifTool status & configuration ---
+
+    def _refresh_exiftool_status(self):
+        success, message = exiftool_manager.ensure_exiftool_available()
+        self.exiftool_available = success
+        # Keep the status bar label short -- the full message (which can be
+        # a long sentence with a URL in it) goes in the tooltip instead.
+        # Putting the whole message directly into a permanent status bar
+        # widget forces Qt to size the label (and therefore the window's
+        # minimum width) to fit it on one line, which can exceed the
+        # screen width on smaller/narrower monitors.
+        self.exiftool_status_label.setText("ExifTool: OK" if success else "ExifTool: Unavailable")
+        self.exiftool_status_label.setToolTip(message)
+        self.exiftool_status_label.setStyleSheet(OK_STYLE if success else WARNING_STYLE)
+        self.apply_button.setEnabled(success)
+        self.apply_button.setToolTip(
+            "" if success else "ExifTool is unavailable -- set a path in Settings > Set ExifTool Path..."
+        )
+
+    def _on_set_exiftool_path(self):
+        import platform
+        exe_filter = "exiftool.exe (exiftool.exe)" if platform.system() == "Windows" else "exiftool (exiftool)"
+        path, _ = QFileDialog.getOpenFileName(self, "Select ExifTool Executable", "", exe_filter + ";;All Files (*)")
+        if not path:
+            return
+        exiftool_manager.set_custom_path(path)
+        self._refresh_exiftool_status()
+
+    def _on_clear_exiftool_path(self):
+        exiftool_manager.set_custom_path("")
+        self._refresh_exiftool_status()
+        QMessageBox.information(self, "ExifTool Path Cleared",
+                                 "Custom path cleared. The app will auto-detect ExifTool again.")
+
+    def _show_about_dialog(self):
+        QMessageBox.about(
+            self, "About Film Tagger",
+            f"<b>Film Tagger</b><p>Version: {APP_VERSION}</p>"
+            "<p>Adds camera, film stock, lens, aperture and shutter speed metadata "
+            "to scanned or digitally-photographed 35mm film rolls.</p>"
+        )
+
+    # --- UI construction ---
+
+    def _create_batch_metadata_panel(self):
+        self.batch_metadata_group = QGroupBox("Batch Metadata (Entire Roll)")
+        layout = QVBoxLayout()
+        layout.addWidget(QLabel("Camera Body:"))
+        self.camera_combo = QComboBox()
+        layout.addWidget(self.camera_combo)
+        layout.addWidget(QLabel("Film Stock:"))
+        self.film_stock_combo = QComboBox()
+        layout.addWidget(self.film_stock_combo)
+        layout.addWidget(QLabel("ISO (box speed, or as shot if pushed/pulled):"))
+        self.iso_edit = QLineEdit()
+        self.iso_edit.setPlaceholderText("e.g., 200")
+        layout.addWidget(self.iso_edit)
+        layout.addWidget(QLabel("Roll Notes:"))
+        self.roll_notes_edit = QTextEdit()
+        layout.addWidget(self.roll_notes_edit)
+        layout.addStretch()
+        self.batch_metadata_group.setLayout(layout)
+
+    def _create_filmstrip_panel(self):
+        self.filmstrip_group = QGroupBox("Filmstrip View")
+        layout = QVBoxLayout()
+        self.filmstrip_list = QListWidget()
+        self.filmstrip_list.setIconSize(QSize(180, 180))
+        self.filmstrip_list.setFlow(QListWidget.Flow.LeftToRight)
+        self.filmstrip_list.setWrapping(True)
+        self.filmstrip_list.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.filmstrip_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        layout.addWidget(self.filmstrip_list)
+        self.filmstrip_group.setLayout(layout)
+
+    def _create_selection_metadata_panel(self):
+        self.selection_metadata_group = QGroupBox("Selection Metadata")
+        layout = QVBoxLayout()
+        layout.addWidget(QLabel("Lens:"))
+        self.lens_combo = QComboBox()
+        layout.addWidget(self.lens_combo)
+        layout.addWidget(QLabel("Aperture (F-Number):"))
+        self.aperture_edit = QLineEdit()
+        self.aperture_edit.setPlaceholderText("e.g., 8 or f/8")
+        layout.addWidget(self.aperture_edit)
+        layout.addWidget(QLabel("Shutter Speed:"))
+        self.shutter_edit = QLineEdit()
+        self.shutter_edit.setPlaceholderText("e.g., 1/125 or 125")
+        layout.addWidget(self.shutter_edit)
+        layout.addStretch()
+        self.selection_metadata_group.setLayout(layout)
+
+    def _create_menu_bar(self):
+        menu_bar = self.menuBar()
+
+        edit_menu = menu_bar.addMenu("&Edit")
+        manage_presets_action = QAction("Manage Presets...", self)
+        manage_presets_action.triggered.connect(self.open_preset_editor)
+        edit_menu.addAction(manage_presets_action)
+
+        settings_menu = menu_bar.addMenu("&Settings")
+        exiftool_path_action = QAction("Set &ExifTool Path...", self)
+        exiftool_path_action.triggered.connect(self._on_set_exiftool_path)
+        settings_menu.addAction(exiftool_path_action)
+        clear_exiftool_path_action = QAction("&Clear Custom ExifTool Path", self)
+        clear_exiftool_path_action.triggered.connect(self._on_clear_exiftool_path)
+        settings_menu.addAction(clear_exiftool_path_action)
+
+        help_menu = menu_bar.addMenu("&Help")
+        about_action = QAction("&About", self)
+        about_action.triggered.connect(self._show_about_dialog)
+        help_menu.addAction(about_action)
+
+    def _create_status_bar(self):
+        self.status_bar = QStatusBar()
+        self.setStatusBar(self.status_bar)
+
+        self.exiftool_status_label = QLabel("ExifTool: checking...")
+        self.exiftool_status_label.setStyleSheet(NORMAL_STYLE)
+        # Hard cap so no future status text (long paths, long messages) can
+        # blow out the status bar's minimum width the way the original
+        # unwrapped warning message did.
+        self.exiftool_status_label.setMaximumWidth(160)
+        self.status_bar.addPermanentWidget(self.exiftool_status_label)
+
+        self.load_button = QPushButton("Load Roll...")
+        self.load_button.clicked.connect(self._load_roll)
+        self.backup_checkbox = QCheckBox("Create temporary backup")
+        self.backup_checkbox.setChecked(self.settings.value("backupEnabled", True, type=bool))
+        self.backup_checkbox.setToolTip("If checked, original files will be backed up before metadata is written.")
+        self.backup_checkbox.toggled.connect(lambda checked: self.settings.setValue("backupEnabled", checked))
+        self.apply_button = QPushButton("Apply Changes")
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        self.status_bar.addPermanentWidget(self.load_button)
+        self.status_bar.addPermanentWidget(self.backup_checkbox)
+        self.status_bar.addPermanentWidget(self.apply_button)
+        self.status_bar.addPermanentWidget(self.progress_bar)
+
+    # --- Shutdown ---
+
+    def closeEvent(self, event):
+        if self.write_worker:
+            self.write_worker.stop()
+        if self.write_thread and self.write_thread.isRunning():
+            self.write_thread.quit()
+            self.write_thread.wait()
+        # Bump the generation so any thumbnail results still in flight are
+        # discarded rather than touching a filmstrip that's about to close.
+        self._load_generation += 1
+        self.threadpool.waitForDone(3000)
+        event.accept()

@@ -6,5 +6,53 @@
         "FNumber": "1.4",
         "LensSerialNumber": "4586043",
         "ImageDescription": ""
+    },
+    "Canon nFD 85mm f1.8": {
+        "LensMake": "Canon",
+        "LensModel": "nFD",
+        "FocalLength": "85mm",
+        "FNumber": "1.8",
+        "LensSerialNumber": "61618",
+        "ImageDescription": ""
+    },
+    "Canon nFD 24mm f2.8": {
+        "LensMake": "Canon",
+        "LensModel": "nFD",
+        "FocalLength": "24mm",
+        "FNumber": "2.8",
+        "LensSerialNumber": "130721",
+        "ImageDescription": ""
+    },
+    "Pentax SMC 35mm f2.0": {
+        "LensMake": "Pentax",
+        "LensModel": "Super-Multi-Coated Takumar",
+        "FocalLength": "35mm",
+        "FNumber": "2.0",
+        "LensSerialNumber": "5210769",
+        "ImageDescription": ""
+    },
+    "Pentax SMC Takumar 20mm f4.5": {
+        "LensMake": "Pentax",
+        "LensModel": "Super-Multi-Coated Takumar",
+        "FocalLength": "20",
+        "FNumber": "4.5",
+        "LensSerialNumber": "5403427",
+        "ImageDescription": ""
+    },
+    "Canon nFD 35mm f2.8": {
+        "LensMake": "Canon",
+        "LensModel": "nFD",
+        "FocalLength": "35mm",
+        "FNumber": "2.8",
+        "LensSerialNumber": "63934",
+        "ImageDescription": ""
+    },
+    "Canon nFD 100mm f2.8": {
+        "LensMake": "Canon",
+        "LensModel": "nFD",
+        "FocalLength": "100mm",
+        "FNumber": "2.8",
+        "LensSerialNumber": "44108",
+        "ImageDescription": ""
     }
 }

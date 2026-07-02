@@ -1,4 +1,12 @@
 {
-    "Kodak Gold 200": { "ISO": "200" },
-    "Ilford HP5+ 400": { "ISO": "400" }
+    "Kodak Gold 200": {
+        "ISO": "200"
+    },
+    "Ilford HP5+ 400": {
+        "ISO": "400"
+    },
+    "Kodak Portra 400": {
+        "ISO": "400",
+        "FilmType": "Color Negative"
+    }
 }

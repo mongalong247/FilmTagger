@@ -1,41 +1,34 @@
 import sys
-from PyQt6.QtWidgets import QApplication, QMessageBox
 
-# Import the main window class from our ui folder
-from ui.main_window import MainWindow
-# We also import the exiftool manager to check for it on startup
-import exiftool_manager
+from PySide6.QtWidgets import QApplication, QMessageBox
+
+from main_window import MainWindow
+
 
 def main():
     """
     Main function to initialize and run the Film Tagger application.
     """
-    # 1. Check for ExifTool dependency first.
-    #    This is a critical check from your original project and is good practice.
-    if not exiftool_manager.check_or_install_exiftool():
-        # A basic QMessageBox can be used before the main app is running.
-        QMessageBox.critical(
-            None,
-            "Critical Error",
-            "Could not install or find ExifTool. The application cannot continue.\n\n"
-            "Please check your internet connection or place 'exiftool.exe' "
-            "in the 'resources' folder."
-        )
-        sys.exit(1) # Exit the application if the dependency is missing.
-
-    # 2. Create the application instance.
     app = QApplication(sys.argv)
 
-    # 3. Create an instance of our main window.
+    # ExifTool availability is not treated as fatal: the app launches either
+    # way, and MainWindow._refresh_exiftool_status() (called from its
+    # __init__) reflects the real status in the status bar and disables
+    # "Apply Changes" specifically if nothing usable was found. Loading and
+    # browsing a roll still works fine without ExifTool.
     window = MainWindow()
+    if not window.exiftool_available:
+        QMessageBox.warning(
+            window, "ExifTool Not Found",
+            "ExifTool could not be found, so writing metadata is disabled for this "
+            "session.\n\nLoading and reviewing a roll will still work normally. To "
+            "enable tagging, install ExifTool and either add it to your system PATH, "
+            "or point the app at it directly via Settings > Set ExifTool Path..."
+        )
 
-    # 4. Show the window.
     window.show()
-
-    # 5. Start the application's event loop.
     sys.exit(app.exec())
 
 
-# This ensures the main() function is called only when the script is executed directly.
 if __name__ == '__main__':
     main()
