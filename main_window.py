@@ -5,10 +5,11 @@ import shutil
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QMessageBox,
     QPushButton, QComboBox, QTextEdit, QLineEdit, QListWidget, QListWidgetItem,
-    QSplitter, QGroupBox, QStatusBar, QProgressBar, QFileDialog, QCheckBox
+    QSplitter, QGroupBox, QStatusBar, QProgressBar, QFileDialog, QCheckBox,
+    QDialog, QDialogButtonBox, QTableWidget, QTableWidgetItem, QHeaderView
 )
-from PySide6.QtCore import Qt, QThread, QThreadPool, QSize, QSettings
-from PySide6.QtGui import QAction, QIcon, QPainter, QColor, QPixmap
+from PySide6.QtCore import Qt, QThread, QThreadPool, QSize, QSettings, QUrl
+from PySide6.QtGui import QAction, QIcon, QPainter, QColor, QPixmap, QDesktopServices
 
 import preset_manager
 import exiftool_manager
@@ -34,13 +35,98 @@ SETTINGS_APP = "FilmTagger"
 
 def _natural_sort_key(path: str):
     """
-    Sort key that orders filenames the way a person would (frame2 before
+    Sort key that orders paths the way a person would (frame2 before
     frame10), not plain alphabetically (which would put frame10 before
-    frame2). Splits the filename on runs of digits and treats each digit
-    run as an integer for comparison.
+    frame2). Splits on runs of digits and treats each digit run as an
+    integer. Uses the full (normalized) path rather than just the
+    filename, so a recursive load groups files by folder first, then
+    orders naturally within each folder.
     """
-    name = os.path.basename(path)
-    return [int(tok) if tok.isdigit() else tok.lower() for tok in re.split(r'(\d+)', name)]
+    normalized = path.replace("\\", "/")
+    return [int(tok) if tok.isdigit() else tok.lower() for tok in re.split(r'(\d+)', normalized)]
+
+
+class ApplyPreviewDialog(QDialog):
+    """
+    Shows exactly what's about to be written before any file is touched.
+    Rows for frames missing Lens/Aperture/Shutter (the per-frame fields set
+    in stage two of the workflow) are highlighted, so a skipped frame is
+    obvious before you commit rather than after.
+    """
+    def __init__(self, image_data: dict, ordered_paths: list, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Review Before Applying")
+        self.resize(950, 500)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(
+            f"About to write metadata to {len(ordered_paths)} file(s). "
+            "Rows highlighted in orange are missing a lens, aperture, or shutter speed value."
+        ))
+
+        columns = ["Filename", "Camera", "Film Stock", "ISO", "Lens", "Aperture", "Shutter", "Notes"]
+        table = QTableWidget(len(ordered_paths), len(columns))
+        table.setHorizontalHeaderLabels(columns)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        table.verticalHeader().setVisible(False)
+
+        for row, path in enumerate(ordered_paths):
+            data = image_data.get(path, {})
+            incomplete = not (data.get('Lens') and data.get('Aperture') and data.get('ShutterSpeed'))
+            values = [
+                os.path.basename(path), data.get('Camera', ''), data.get('FilmStock', ''),
+                data.get('ISO', ''), data.get('Lens', ''), data.get('Aperture', ''),
+                data.get('ShutterSpeed', ''), data.get('RollNotes', ''),
+            ]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if incomplete:
+                    item.setBackground(QColor("#fff3e0"))
+                    item.setForeground(QColor("#b26a00"))
+                table.setItem(row, col, item)
+
+        layout.addWidget(table)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        button_box.button(QDialogButtonBox.StandardButton.Ok).setText("Apply Changes")
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+
+class BackupCleanupDialog(QDialog):
+    """
+    Asks what to do with a completed backup, with a way to actually look at
+    it first rather than deleting or keeping it blind. "Open Backup Folder"
+    does not close the dialog, so you can check the files and come back.
+    """
+    def __init__(self, backup_path: str, parent=None):
+        super().__init__(parent)
+        self.backup_path = backup_path
+        self.setWindowTitle("Temporary Backup")
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(
+            "A backup of the original files was made before writing metadata:\n\n"
+            f"{backup_path}\n\n"
+            "You can open the folder to check the originals are intact before "
+            "deciding whether to delete this backup."
+        ))
+        button_layout = QHBoxLayout()
+        open_button = QPushButton("Open Backup Folder")
+        open_button.clicked.connect(self._open_folder)
+        button_layout.addWidget(open_button)
+        button_layout.addStretch()
+        keep_button = QPushButton("Keep Backup")
+        keep_button.setDefault(True)
+        keep_button.clicked.connect(self.reject)
+        delete_button = QPushButton("Delete Backup")
+        delete_button.clicked.connect(self.accept)
+        button_layout.addWidget(keep_button)
+        button_layout.addWidget(delete_button)
+        layout.addLayout(button_layout)
+
+    def _open_folder(self):
+        QDesktopServices.openUrl(QUrl.fromLocalFile(self.backup_path))
 
 
 class MainWindow(QMainWindow):
@@ -107,12 +193,13 @@ class MainWindow(QMainWindow):
                                  "ExifTool isn't available, so metadata can't be written. "
                                  "Check Settings > Set ExifTool Path...")
             return
-        reply = QMessageBox.question(self, "Confirm Changes",
-                                     f"You are about to write metadata to {len(self.image_data)} files. Are you sure you want to proceed?",
-                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                                     QMessageBox.StandardButton.No)
-        if reply == QMessageBox.StandardButton.No:
+
+        ordered_paths = [self.filmstrip_list.item(i).data(Qt.ItemDataRole.UserRole)
+                          for i in range(self.filmstrip_list.count())]
+        preview = ApplyPreviewDialog(self.image_data, ordered_paths, self)
+        if preview.exec() != QDialog.DialogCode.Accepted:
             return
+
         tasks = self._prepare_task_list()
         if not tasks:
             QMessageBox.critical(self, "Error", "Could not prepare data for writing. Please check your presets.")
@@ -198,11 +285,8 @@ class MainWindow(QMainWindow):
         # the user has had a chance to investigate -- it's the only safety
         # net for whatever went wrong.
         if not failed and self.backup_checkbox.isChecked() and backup_path and os.path.exists(backup_path):
-            reply = QMessageBox.question(self, "Delete Backup",
-                                         f"Do you want to delete the temporary backup folder?\n\n{backup_path}",
-                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                                         QMessageBox.StandardButton.Yes)
-            if reply == QMessageBox.StandardButton.Yes:
+            dialog = BackupCleanupDialog(backup_path, self)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
                 try:
                     shutil.rmtree(backup_path)
                     self.status_bar.showMessage("Temporary backup deleted.", 5000)
@@ -222,6 +306,7 @@ class MainWindow(QMainWindow):
         self.load_button.setEnabled(enabled)
         self.apply_button.setEnabled(enabled and self.exiftool_available)
         self.backup_checkbox.setEnabled(enabled)
+        self.recursive_checkbox.setEnabled(enabled)
 
     # --- Batch panel handlers ---
 
@@ -258,6 +343,26 @@ class MainWindow(QMainWindow):
         for path in self.image_data:
             self.image_data[path]['RollNotes'] = notes
 
+    def _update_frame_indicator(self, path: str):
+        """
+        Flags a frame in the filmstrip as still needing per-frame data
+        (Lens/Aperture/Shutter -- the stage-two fields) so it's visible at
+        a glance while browsing, not just discovered later in the preview
+        dialog or after writing.
+        """
+        item = self._filmstrip_items.get(path)
+        if item is None:
+            return
+        data = self.image_data.get(path, {})
+        complete = bool(data.get('Lens')) and bool(data.get('Aperture')) and bool(data.get('ShutterSpeed'))
+        filename = os.path.basename(path)
+        if complete:
+            item.setText(filename)
+            item.setData(Qt.ItemDataRole.ForegroundRole, None)
+        else:
+            item.setText(f"\u26a0 {filename}")
+            item.setForeground(QColor("#b26a00"))
+
     # --- Selection panel handlers ---
 
     def _on_selection_lens_changed(self, index):
@@ -268,6 +373,7 @@ class MainWindow(QMainWindow):
             path = item.data(Qt.ItemDataRole.UserRole)
             if path in self.image_data:
                 self.image_data[path]['Lens'] = lens_name
+                self._update_frame_indicator(path)
 
     def _on_selection_aperture_changed(self, text):
         if self._is_updating_ui:
@@ -276,6 +382,7 @@ class MainWindow(QMainWindow):
             path = item.data(Qt.ItemDataRole.UserRole)
             if path in self.image_data:
                 self.image_data[path]['Aperture'] = text
+                self._update_frame_indicator(path)
 
     def _on_selection_shutter_changed(self, text):
         if self._is_updating_ui:
@@ -284,6 +391,7 @@ class MainWindow(QMainWindow):
             path = item.data(Qt.ItemDataRole.UserRole)
             if path in self.image_data:
                 self.image_data[path]['ShutterSpeed'] = text
+                self._update_frame_indicator(path)
 
     def _on_filmstrip_selection_changed(self):
         self._is_updating_ui = True
@@ -322,11 +430,18 @@ class MainWindow(QMainWindow):
         self._load_generation += 1
         generation = self._load_generation
 
-        image_files = sorted(
-            (os.path.join(directory, f) for f in os.listdir(directory)
-             if f.lower().endswith(IMAGE_EXTENSIONS)),
-            key=_natural_sort_key
-        )
+        if self.recursive_checkbox.isChecked():
+            image_files = []
+            for root, _dirs, files in os.walk(directory):
+                for f in files:
+                    if f.lower().endswith(IMAGE_EXTENSIONS):
+                        image_files.append(os.path.join(root, f))
+        else:
+            image_files = [
+                os.path.join(directory, f) for f in os.listdir(directory)
+                if f.lower().endswith(IMAGE_EXTENSIONS) and os.path.isfile(os.path.join(directory, f))
+            ]
+        image_files.sort(key=_natural_sort_key)
         if not image_files:
             self.status_bar.showMessage("No compatible image files found.", 5000)
             return
@@ -342,6 +457,7 @@ class MainWindow(QMainWindow):
             item.setData(Qt.ItemDataRole.UserRole, path)
             self.filmstrip_list.addItem(item)
             self._filmstrip_items[path] = item
+            self._update_frame_indicator(path)
 
         self.status_bar.showMessage(f"Loading {len(image_files)} images...")
         self.progress_bar.setVisible(True)
@@ -554,6 +670,10 @@ class MainWindow(QMainWindow):
 
         self.load_button = QPushButton("Load Roll...")
         self.load_button.clicked.connect(self._load_roll)
+        self.recursive_checkbox = QCheckBox("Include subfolders")
+        self.recursive_checkbox.setToolTip("Search subfolders too, for rolls organized in nested date/roll folders.")
+        self.recursive_checkbox.setChecked(self.settings.value("recursiveLoad", False, type=bool))
+        self.recursive_checkbox.toggled.connect(lambda checked: self.settings.setValue("recursiveLoad", checked))
         self.backup_checkbox = QCheckBox("Create temporary backup")
         self.backup_checkbox.setChecked(self.settings.value("backupEnabled", True, type=bool))
         self.backup_checkbox.setToolTip("If checked, original files will be backed up before metadata is written.")
@@ -562,6 +682,7 @@ class MainWindow(QMainWindow):
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
         self.status_bar.addPermanentWidget(self.load_button)
+        self.status_bar.addPermanentWidget(self.recursive_checkbox)
         self.status_bar.addPermanentWidget(self.backup_checkbox)
         self.status_bar.addPermanentWidget(self.apply_button)
         self.status_bar.addPermanentWidget(self.progress_bar)

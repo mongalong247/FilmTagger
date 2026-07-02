@@ -3,7 +3,7 @@ import shutil
 import tempfile
 from datetime import datetime
 
-from PySide6.QtCore import QObject, Signal, QSize, Qt, QRunnable
+from PySide6.QtCore import QObject, Signal, Qt, QRunnable
 from PySide6.QtGui import QImageReader, QIcon, QPixmap
 
 import exiftool_manager
@@ -61,7 +61,16 @@ class ThumbnailTask(QRunnable):
     def _read_standard_image(self):
         """Decodes a directly-supported image format (jpg, tiff, png, heic...)."""
         reader = QImageReader(self.image_path)
-        reader.setScaledSize(QSize(self.thumbnail_size, self.thumbnail_size))
+        original_size = reader.size()
+        if original_size.isValid():
+            # Scale to fit within a thumbnail_size x thumbnail_size box while
+            # keeping native aspect ratio -- forcing setScaledSize to a fixed
+            # square (the previous behavior) stretched/cropped every 4:3 or
+            # 3:2 frame into a square.
+            target = original_size.scaled(
+                self.thumbnail_size, self.thumbnail_size, Qt.AspectRatioMode.KeepAspectRatio
+            )
+            reader.setScaledSize(target)
         image = reader.read()
         if image.isNull():
             return None
@@ -89,9 +98,18 @@ class ExifWriteWorker(QObject):
     """
     A worker that processes a list of images to write EXIF data in the background.
     Handles temporary backups and reports progress.
+
+    Per-file failures are isolated: a file that can't be backed up or
+    tagged is recorded and skipped, and the rest of the batch still runs.
+    The old behavior -- raising on the first failure and aborting every
+    remaining file -- meant one locked/corrupt file partway through a roll
+    silently left the rest of the roll untagged with no record of what had
+    actually completed.
     """
-    progress = Signal(int, str)   # percentage, status message
-    finished = Signal(bool, str)  # success/failure, backup path (or error message)
+    progress = Signal(int, str)  # percentage, status message
+    finished = Signal(dict)      # {'cancelled': bool, 'succeeded': int,
+                                  #  'failed': [(filename, reason), ...],
+                                  #  'backup_path': str}
 
     def __init__(self, tasks: list, backup_enabled: bool):
         super().__init__()
@@ -105,38 +123,65 @@ class ExifWriteWorker(QObject):
     def run(self):
         total_files = len(self.tasks)
         backup_path = ""
+        succeeded = 0
+        failed = []  # list of (filename, reason)
 
         if total_files == 0:
-            self.finished.emit(True, backup_path)
+            self.finished.emit({'cancelled': False, 'succeeded': 0, 'failed': [], 'backup_path': backup_path})
             return
 
-        try:
-            if self.backup_enabled:
+        if self.backup_enabled:
+            try:
                 timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
                 backup_path = os.path.join(tempfile.gettempdir(), "FilmTagger", f"Backup_{timestamp}")
                 os.makedirs(backup_path, exist_ok=True)
                 print(f"Backup folder created at: {backup_path}")
+            except Exception as e:
+                # Can't create the safety net at all -- that's serious enough
+                # to abort the whole batch rather than write without one.
+                self.finished.emit({
+                    'cancelled': False,
+                    'succeeded': 0,
+                    'failed': [(os.path.basename(p), f"Backup folder could not be created: {e}") for p, _ in self.tasks],
+                    'backup_path': '',
+                })
+                return
 
-            for idx, (image_path, metadata_dict) in enumerate(self.tasks):
-                if not self.is_running:
-                    raise InterruptedError("Process cancelled by user.")
+        cancelled = False
+        for idx, (image_path, metadata_dict) in enumerate(self.tasks):
+            if not self.is_running:
+                cancelled = True
+                break
 
-                progress_percent = int((idx + 1) / total_files * 100)
-                filename = os.path.basename(image_path)
-                self.progress.emit(progress_percent, f"Processing {filename}...")
+            progress_percent = int((idx + 1) / total_files * 100)
+            filename = os.path.basename(image_path)
+            self.progress.emit(progress_percent, f"Processing {filename}...")
 
-                if self.backup_enabled:
+            if self.backup_enabled:
+                try:
                     shutil.copy2(image_path, backup_path)
+                except Exception as e:
+                    # Don't write metadata to a file we couldn't back up first.
+                    failed.append((filename, f"Backup failed, file was skipped: {e}"))
+                    continue
 
-                if not exiftool_manager.write_metadata(image_path, metadata_dict):
-                    raise IOError(f"Failed to write metadata for {filename}.")
+            try:
+                write_ok = exiftool_manager.write_metadata(image_path, metadata_dict)
+            except Exception as e:
+                # Defensive: write_metadata() isn't expected to raise, but
+                # nothing here should be able to take down the rest of the
+                # batch, so catch anything unexpected too.
+                failed.append((filename, f"Unexpected error: {e}"))
+                continue
 
-            self.finished.emit(True, backup_path)
+            if write_ok:
+                succeeded += 1
+            else:
+                failed.append((filename, "ExifTool failed to write metadata (see console log for detail)"))
 
-        except Exception as e:
-            error_message = f"Error: {e}. Originals are safe in backup folder: {backup_path}" if self.backup_enabled else f"Error: {e}"
-            self.finished.emit(False, error_message)
-
-
-class InterruptedError(Exception):
-    pass
+        self.finished.emit({
+            'cancelled': cancelled,
+            'succeeded': succeeded,
+            'failed': failed,
+            'backup_path': backup_path,
+        })
