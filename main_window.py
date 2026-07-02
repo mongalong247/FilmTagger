@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 
 from PySide6.QtWidgets import (
@@ -31,6 +32,17 @@ SETTINGS_ORG = "PhotoTagger"
 SETTINGS_APP = "FilmTagger"
 
 
+def _natural_sort_key(path: str):
+    """
+    Sort key that orders filenames the way a person would (frame2 before
+    frame10), not plain alphabetically (which would put frame10 before
+    frame2). Splits the filename on runs of digits and treats each digit
+    run as an integer for comparison.
+    """
+    name = os.path.basename(path)
+    return [int(tok) if tok.isdigit() else tok.lower() for tok in re.split(r'(\d+)', name)]
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -46,6 +58,9 @@ class MainWindow(QMainWindow):
         self.write_thread = None
         self.write_worker = None
         self.image_data = {}
+        self._filmstrip_items = {}  # image_path -> QListWidgetItem, so async
+                                     # thumbnail results update in place and
+                                     # never disturb frame order
         self._is_updating_ui = False
         self.exiftool_available = False
 
@@ -283,19 +298,30 @@ class MainWindow(QMainWindow):
         self.settings.setValue("lastSourceFolder", directory)
         self.filmstrip_list.clear()
         self.image_data.clear()
+        self._filmstrip_items.clear()
         self._load_generation += 1
         generation = self._load_generation
 
-        image_files = [
-            os.path.join(directory, f) for f in os.listdir(directory)
-            if f.lower().endswith(IMAGE_EXTENSIONS)
-        ]
+        image_files = sorted(
+            (os.path.join(directory, f) for f in os.listdir(directory)
+             if f.lower().endswith(IMAGE_EXTENSIONS)),
+            key=_natural_sort_key
+        )
         if not image_files:
             self.status_bar.showMessage("No compatible image files found.", 5000)
             return
 
+        # Populate placeholder items in the final, correct order up front.
+        # Thumbnails are then filled in *in place* as each background task
+        # finishes (which can happen in any order) rather than appended,
+        # so frame order on screen never depends on thread completion timing.
+        placeholder_icon = self._create_placeholder_icon()
         for path in image_files:
             self.image_data[path] = {}
+            item = QListWidgetItem(placeholder_icon, os.path.basename(path))
+            item.setData(Qt.ItemDataRole.UserRole, path)
+            self.filmstrip_list.addItem(item)
+            self._filmstrip_items[path] = item
 
         self.status_bar.showMessage(f"Loading {len(image_files)} images...")
         self.progress_bar.setVisible(True)
@@ -308,7 +334,7 @@ class MainWindow(QMainWindow):
             self.threadpool.start(task)
 
     def _create_placeholder_icon(self) -> QIcon:
-        """Creates a generic grey placeholder icon for failed thumbnails."""
+        """Creates a generic grey placeholder icon for failed/pending thumbnails."""
         size = self.filmstrip_list.iconSize()
         pixmap = QPixmap(size)
         pixmap.fill(QColor("lightgray"))
@@ -327,16 +353,13 @@ class MainWindow(QMainWindow):
         if generation != self._load_generation:
             return
 
-        filename = os.path.basename(image_path)
+        item = self._filmstrip_items.get(image_path)
+        if item is None:
+            return
 
-        if icon.isNull():
-            final_icon = self._create_placeholder_icon()
-            item = QListWidgetItem(final_icon, filename)
-        else:
-            item = QListWidgetItem(icon, filename)
-
-        item.setData(Qt.ItemDataRole.UserRole, image_path)
-        self.filmstrip_list.addItem(item)
+        if not icon.isNull():
+            item.setIcon(icon)
+        # else: leave the placeholder icon already on the item in place.
 
         current_value = self.progress_bar.value() + 1
         self.progress_bar.setValue(current_value)
@@ -442,11 +465,20 @@ class MainWindow(QMainWindow):
         self.filmstrip_group = QGroupBox("Filmstrip View")
         layout = QVBoxLayout()
         self.filmstrip_list = QListWidget()
+        # IconMode is what actually gives grid/contact-sheet layout;
+        # Flow + Wrapping alone (the previous setup) still uses ListMode's
+        # row-based layout rules underneath, which is why wrapping looked
+        # wrong before.
+        self.filmstrip_list.setViewMode(QListWidget.ViewMode.IconMode)
+        self.filmstrip_list.setMovement(QListWidget.Movement.Static)
         self.filmstrip_list.setIconSize(QSize(180, 180))
+        self.filmstrip_list.setGridSize(QSize(210, 220))
+        self.filmstrip_list.setSpacing(8)
         self.filmstrip_list.setFlow(QListWidget.Flow.LeftToRight)
         self.filmstrip_list.setWrapping(True)
         self.filmstrip_list.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.filmstrip_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        self.filmstrip_list.setWordWrap(True)
         layout.addWidget(self.filmstrip_list)
         self.filmstrip_group.setLayout(layout)
 
