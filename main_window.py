@@ -170,25 +170,45 @@ class MainWindow(QMainWindow):
             tasks.append((path, final_exif_cleaned))
         return tasks
 
-    def _on_apply_finished(self, success: bool, message: str):
+    def _on_apply_finished(self, result: dict):
         self.progress_bar.setVisible(False)
         self.status_bar.showMessage("Ready.")
-        if success:
-            backup_path = message
-            QMessageBox.information(self, "Success", "Metadata applied to all files successfully.")
-            if self.backup_checkbox.isChecked() and backup_path and os.path.exists(backup_path):
-                reply = QMessageBox.question(self, "Delete Backup",
-                                             f"Do you want to delete the temporary backup folder?\n\n{backup_path}",
-                                             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                                             QMessageBox.StandardButton.Yes)
-                if reply == QMessageBox.StandardButton.Yes:
-                    try:
-                        shutil.rmtree(backup_path)
-                        self.status_bar.showMessage("Temporary backup deleted.", 5000)
-                    except Exception as e:
-                        QMessageBox.warning(self, "Error", f"Could not delete backup folder: {e}")
+
+        succeeded = result['succeeded']
+        failed = result['failed']
+        backup_path = result['backup_path']
+        cancelled = result['cancelled']
+
+        if failed:
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Icon.Warning)
+            msg.setWindowTitle("Completed With Errors")
+            summary = f"{succeeded} file(s) tagged successfully.\n{len(failed)} file(s) failed"
+            summary += " (batch was cancelled before finishing)." if cancelled else "."
+            msg.setText(summary)
+            msg.setDetailedText("\n".join(f"{name}: {reason}" for name, reason in failed))
+            msg.exec()
+        elif cancelled:
+            QMessageBox.information(self, "Cancelled", f"Cancelled after tagging {succeeded} file(s).")
         else:
-            QMessageBox.critical(self, "Process Failed", message)
+            QMessageBox.information(self, "Success", f"Metadata applied to all {succeeded} file(s) successfully.")
+
+        # Only offer to clean up the backup if nothing failed. If some files
+        # failed, the backup is kept regardless of the checkbox state until
+        # the user has had a chance to investigate -- it's the only safety
+        # net for whatever went wrong.
+        if not failed and self.backup_checkbox.isChecked() and backup_path and os.path.exists(backup_path):
+            reply = QMessageBox.question(self, "Delete Backup",
+                                         f"Do you want to delete the temporary backup folder?\n\n{backup_path}",
+                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                         QMessageBox.StandardButton.Yes)
+            if reply == QMessageBox.StandardButton.Yes:
+                try:
+                    shutil.rmtree(backup_path)
+                    self.status_bar.showMessage("Temporary backup deleted.", 5000)
+                except Exception as e:
+                    QMessageBox.warning(self, "Error", f"Could not delete backup folder: {e}")
+
         self._set_ui_enabled(True)
         if self.write_thread:
             self.write_thread.quit()
