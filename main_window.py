@@ -883,4 +883,8 @@ class MainWindow(QMainWindow):
         # discarded rather than touching a filmstrip that's about to close.
         self._load_generation += 1
         self.threadpool.waitForDone(3000)
+        # Shuts down any persistent ExifTool process(es) started during this
+        # session (see exiftool_manager.py's pool) so none are left running
+        # as orphans after the app closes. Ported from ImageImporter.
+        exiftool_manager.close_session()
         event.accept()

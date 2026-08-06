@@ -1,0 +1,11 @@
+# Ignore ExifTool binary -- unzipped at build time from vendor/*.zip (see
+# packaging/README.md), never committed itself.
+/resources/exiftool.exe
+/resources/exiftool_files/
+
+# PyInstaller build output
+/build/
+/dist/
+
+__pycache__/
+*.pyc

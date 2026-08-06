@@ -1,0 +1,6 @@
+# Packaging-only dependencies -- NOT needed to run FilmTagger from source,
+# only to build the distributable app with PyInstaller. Keep separate from
+# requirements.txt so a normal dev/runtime install doesn't pull this in.
+#
+#   pip install -r requirements.txt -r requirements-build.txt
+pyinstaller>=6.21,<7

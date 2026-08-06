@@ -1,2 +1,8 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Vendored third-party binary -- never touch line endings on this. (git's
+# text=auto content-sniffing heuristic would likely get this right on its
+# own, but a vendored release .zip is exactly the kind of file where it's
+# worth being explicit rather than trusting auto-detection.)
+vendor/*.zip binary
