@@ -14,7 +14,7 @@ from PySide6.QtGui import QAction, QIcon, QPainter, QColor, QPixmap, QDesktopSer
 import preset_manager
 import exiftool_manager
 from preset_editor import PresetEditorDialog
-from workers import ThumbnailTask, ExifWriteWorker
+from workers import ThumbnailTask, PreviewTask, ExifWriteWorker
 
 APP_VERSION = "0.1.0"
 NORMAL_STYLE = "color: gray; font-style: italic;"
@@ -44,6 +44,23 @@ def _natural_sort_key(path: str):
     """
     normalized = path.replace("\\", "/")
     return [int(tok) if tok.isdigit() else tok.lower() for tok in re.split(r'(\d+)', normalized)]
+
+
+class _AutoScalingImageLabel(QLabel):
+    """
+    QLabel that invokes an `on_resize` callback whenever it's resized. Used
+    by the lightbox panel so a splitter drag (which doesn't reach
+    QMainWindow.resizeEvent) still triggers a rescale of the currently
+    displayed preview to fit the new space.
+    """
+    def __init__(self, *args, on_resize=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._on_resize = on_resize
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._on_resize:
+            self._on_resize()
 
 
 class ApplyPreviewDialog(QDialog):
@@ -149,17 +166,26 @@ class MainWindow(QMainWindow):
                                      # never disturb frame order
         self._is_updating_ui = False
         self.exiftool_available = False
+        self._lightbox_generation = 0  # bumped on every selection/visibility
+                                        # change; used to discard a preview
+                                        # decode for a frame the user has
+                                        # since clicked away from
+        self._lightbox_current_pixmap = None  # undecorated pixmap currently
+                                                # shown, kept so it can be
+                                                # rescaled on panel resize
 
         self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.setCentralWidget(self.main_splitter)
 
         self._create_batch_metadata_panel()
         self._create_filmstrip_panel()
+        self._create_lightbox_panel()
         self._create_selection_metadata_panel()
         self.main_splitter.addWidget(self.batch_metadata_group)
         self.main_splitter.addWidget(self.filmstrip_group)
+        self.main_splitter.addWidget(self.lightbox_group)
         self.main_splitter.addWidget(self.selection_metadata_group)
-        self.main_splitter.setSizes([260, 680, 260])
+        self.main_splitter.setSizes([260, 560, 300, 260])
 
         self._create_menu_bar()
         self._create_status_bar()
@@ -168,6 +194,14 @@ class MainWindow(QMainWindow):
         self._connect_signals()
         self._load_last_source_folder()
         self._refresh_exiftool_status()
+
+        # Restore lightbox visibility last, after the action that drives it
+        # exists (_create_menu_bar) -- shown by default since a preview is
+        # generally useful, but the whole point of it being a toggle is that
+        # it can be turned off and stay off across sessions.
+        lightbox_visible = self.settings.value("lightboxVisible", True, type=bool)
+        self.show_lightbox_action.setChecked(lightbox_visible)
+        self._set_lightbox_visible(lightbox_visible)
 
     # --- Signal wiring ---
 
@@ -200,10 +234,13 @@ class MainWindow(QMainWindow):
         if preview.exec() != QDialog.DialogCode.Accepted:
             return
 
-        tasks = self._prepare_task_list()
+        tasks, missing_preset_warnings = self._prepare_task_list()
         if not tasks:
             QMessageBox.critical(self, "Error", "Could not prepare data for writing. Please check your presets.")
             return
+        if missing_preset_warnings and not self._confirm_missing_preset_warnings(missing_preset_warnings):
+            return
+
         self._set_ui_enabled(False)
         self.status_bar.showMessage("Applying changes...")
         self.progress_bar.setVisible(True)
@@ -221,22 +258,48 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(value)
         self.status_bar.showMessage(message)
 
-    def _prepare_task_list(self) -> list:
+    def _prepare_task_list(self) -> tuple:
+        """
+        Builds the final EXIF payload for every loaded frame.
+
+        Returns (tasks, missing_preset_warnings). A frame's Camera or Lens
+        name can end up referencing a preset that's since been deleted or
+        renamed in the Preset Editor (assigned to frames earlier in the
+        session, then removed) -- previously that field was just dropped
+        from the written EXIF with no indication anything was skipped.
+        missing_preset_warnings collects (filename, message) pairs for every
+        such case so the caller can surface it instead of writing silently
+        incomplete metadata.
+        """
         tasks = []
+        missing_preset_warnings = []
         all_presets = {
             'cameras': preset_manager.load_presets('cameras'),
             'lenses': preset_manager.load_presets('lenses'),
         }
         for path, data in self.image_data.items():
             final_exif = {}
+            filename = os.path.basename(path)
 
             camera_name = data.get('Camera')
-            if camera_name and camera_name in all_presets['cameras']:
-                final_exif.update(all_presets['cameras'][camera_name])
+            if camera_name:
+                if camera_name in all_presets['cameras']:
+                    final_exif.update(all_presets['cameras'][camera_name])
+                else:
+                    missing_preset_warnings.append(
+                        (filename, f"Camera preset '{camera_name}' no longer exists -- "
+                                   "camera metadata will not be written for this frame.")
+                    )
 
             lens_name = data.get('Lens')
-            if lens_name and lens_name in all_presets['lenses']:
-                final_exif.update(all_presets['lenses'][lens_name])
+            if lens_name:
+                if lens_name in all_presets['lenses']:
+                    final_exif.update(all_presets['lenses'][lens_name])
+                else:
+                    missing_preset_warnings.append(
+                        (filename, f"Lens preset '{lens_name}' no longer exists -- "
+                                   "lens metadata will not be written for this frame.")
+                    )
 
             if data.get('Aperture'):
                 final_exif['FNumber'] = data['Aperture']
@@ -255,7 +318,31 @@ class MainWindow(QMainWindow):
 
             final_exif_cleaned = {k: v for k, v in final_exif.items() if v}
             tasks.append((path, final_exif_cleaned))
-        return tasks
+        return tasks, missing_preset_warnings
+
+    def _confirm_missing_preset_warnings(self, warnings: list) -> bool:
+        """
+        Shown when one or more frames reference a Camera/Lens preset name
+        that no longer exists in the preset store. Gives the user a chance
+        to cancel and fix the assignment (e.g. re-pick from the dropdown,
+        or re-add the deleted preset) instead of silently writing metadata
+        that's missing a field nobody was told about. Returns True if the
+        user chose to proceed anyway.
+        """
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Icon.Warning)
+        msg.setWindowTitle("Missing Presets")
+        msg.setText(
+            f"{len(warnings)} frame(s) reference a Camera or Lens preset that no longer "
+            "exists. That field will be skipped for those frames unless you cancel and "
+            "fix the assignment first."
+        )
+        msg.setDetailedText("\n".join(f"{name}: {reason}" for name, reason in warnings))
+        msg.setStandardButtons(QMessageBox.StandardButton.Cancel)
+        proceed_button = msg.addButton("Apply Anyway", QMessageBox.ButtonRole.AcceptRole)
+        msg.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        msg.exec()
+        return msg.clickedButton() == proceed_button
 
     def _on_apply_finished(self, result: dict):
         self.progress_bar.setVisible(False)
@@ -414,6 +501,77 @@ class MainWindow(QMainWindow):
             self.shutter_edit.setPlaceholderText("Multiple Values")
             self.shutter_edit.clear()
         self._is_updating_ui = False
+
+        self._refresh_lightbox_for_selection(selected_items)
+
+    # --- Lightbox preview ---
+
+    def _on_toggle_lightbox(self, checked: bool):
+        self.settings.setValue("lightboxVisible", checked)
+        self._set_lightbox_visible(checked)
+
+    def _set_lightbox_visible(self, visible: bool):
+        self.lightbox_group.setVisible(visible)
+        if visible:
+            # Load immediately for whatever's already selected, rather than
+            # waiting for the next selection change -- otherwise turning the
+            # panel back on with a frame already selected shows nothing
+            # until you click a different frame.
+            self._refresh_lightbox_for_selection(self.filmstrip_list.selectedItems())
+
+    def _refresh_lightbox_for_selection(self, selected_items: list):
+        # Bump the generation regardless of visibility/count, so a preview
+        # decode already in flight for a since-abandoned selection is
+        # discarded when it lands rather than overwriting a newer choice.
+        self._lightbox_generation += 1
+
+        if not self.lightbox_group.isVisible():
+            return
+
+        if len(selected_items) != 1:
+            self._lightbox_current_pixmap = None
+            placeholder = ("Select a single frame to preview." if not selected_items
+                           else "Multiple frames selected -- select one to preview.")
+            self.lightbox_image_label.setText(placeholder)
+            self.lightbox_image_label.setPixmap(QPixmap())
+            return
+
+        path = selected_items[0].data(Qt.ItemDataRole.UserRole)
+        self._lightbox_current_pixmap = None
+        self.lightbox_image_label.setPixmap(QPixmap())
+        self.lightbox_image_label.setText("Loading preview...")
+
+        task = PreviewTask(path, generation=self._lightbox_generation)
+        task.signals.finished.connect(self._on_lightbox_preview_ready)
+        self.threadpool.start(task)
+
+    def _on_lightbox_preview_ready(self, image_path: str, pixmap: QPixmap, generation: int):
+        if generation != self._lightbox_generation:
+            return  # stale -- selection or visibility has since changed
+        if pixmap.isNull():
+            self._lightbox_current_pixmap = None
+            self.lightbox_image_label.setText(f"No preview available for\n{os.path.basename(image_path)}")
+            return
+        self._lightbox_current_pixmap = pixmap
+        self._update_lightbox_pixmap_display()
+
+    def _update_lightbox_pixmap_display(self):
+        """
+        Rescales the currently-held preview pixmap to fit the label's
+        current size. Called both when a new preview arrives and on panel
+        resize, so the image tracks the splitter as the user drags it
+        rather than staying locked to whatever size it first decoded at.
+        """
+        if self._lightbox_current_pixmap is None:
+            return
+        target_size = self.lightbox_image_label.size()
+        if target_size.width() <= 0 or target_size.height() <= 0:
+            return
+        scaled = self._lightbox_current_pixmap.scaled(
+            target_size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+        )
+        self.lightbox_image_label.setPixmap(scaled)
+        self.lightbox_image_label.setText("")
 
     # --- Loading a roll ---
 
@@ -618,6 +776,25 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.filmstrip_list)
         self.filmstrip_group.setLayout(layout)
 
+    def _create_lightbox_panel(self):
+        """
+        A large single-frame preview, toggleable via View > Show Lightbox
+        Preview so it can be hidden when the extra decode work and screen
+        space aren't wanted (e.g. on a small monitor, or when working
+        purely off the filmstrip thumbnails).
+        """
+        self.lightbox_group = QGroupBox("Preview")
+        layout = QVBoxLayout()
+        self.lightbox_image_label = _AutoScalingImageLabel(
+            "Select a single frame to preview.", on_resize=self._update_lightbox_pixmap_display
+        )
+        self.lightbox_image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lightbox_image_label.setMinimumSize(200, 200)
+        self.lightbox_image_label.setStyleSheet(NORMAL_STYLE)
+        self.lightbox_image_label.setWordWrap(True)
+        layout.addWidget(self.lightbox_image_label, 1)
+        self.lightbox_group.setLayout(layout)
+
     def _create_selection_metadata_panel(self):
         self.selection_metadata_group = QGroupBox("Selection Metadata")
         layout = QVBoxLayout()
@@ -642,6 +819,13 @@ class MainWindow(QMainWindow):
         manage_presets_action = QAction("Manage Presets...", self)
         manage_presets_action.triggered.connect(self.open_preset_editor)
         edit_menu.addAction(manage_presets_action)
+
+        view_menu = menu_bar.addMenu("&View")
+        self.show_lightbox_action = QAction("Show &Lightbox Preview", self)
+        self.show_lightbox_action.setCheckable(True)
+        self.show_lightbox_action.setShortcut("Ctrl+L")
+        self.show_lightbox_action.toggled.connect(self._on_toggle_lightbox)
+        view_menu.addAction(self.show_lightbox_action)
 
         settings_menu = menu_bar.addMenu("&Settings")
         exiftool_path_action = QAction("Set &ExifTool Path...", self)

@@ -16,6 +16,54 @@ RAW_EXTENSIONS = (
 )
 
 
+def generate_scaled_pixmap(image_path: str, max_size: int):
+    """
+    Decodes `image_path` and returns a QPixmap scaled to fit within a
+    max_size x max_size box (native aspect ratio preserved), or None if it
+    couldn't be decoded. Shared by ThumbnailTask (small icons) and
+    PreviewTask (the lightbox's larger preview) so both go through the same
+    RAW-vs-standard decode logic instead of maintaining it twice.
+    """
+    ext = os.path.splitext(image_path)[1].lower()
+    if ext in RAW_EXTENSIONS:
+        return _extract_raw_preview(image_path, max_size)
+    return _read_standard_image(image_path, max_size)
+
+
+def _read_standard_image(image_path: str, max_size: int):
+    """Decodes a directly-supported image format (jpg, tiff, png, heic...)."""
+    reader = QImageReader(image_path)
+    original_size = reader.size()
+    if original_size.isValid():
+        # Scale to fit within a max_size x max_size box while keeping native
+        # aspect ratio -- forcing setScaledSize to a fixed square stretched/
+        # cropped every 4:3 or 3:2 frame into a square.
+        target = original_size.scaled(max_size, max_size, Qt.AspectRatioMode.KeepAspectRatio)
+        reader.setScaledSize(target)
+    image = reader.read()
+    if image.isNull():
+        return None
+    return QPixmap.fromImage(image)
+
+
+def _extract_raw_preview(image_path: str, max_size: int):
+    """
+    RAW formats aren't decodable by QImageReader in a stock Qt install.
+    Instead, pull the embedded preview/thumbnail JPEG that RAW files
+    already carry, via ExifTool (which this app already depends on).
+    """
+    preview_bytes = exiftool_manager.extract_preview_bytes(image_path)
+    if not preview_bytes:
+        return None
+    pixmap = QPixmap()
+    if not pixmap.loadFromData(preview_bytes):
+        return None
+    return pixmap.scaled(
+        max_size, max_size,
+        Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+    )
+
+
 class ThumbnailSignals(QObject):
     """
     QRunnable itself can't emit signals (it isn't a QObject), so the signal
@@ -49,8 +97,7 @@ class ThumbnailTask(QRunnable):
 
     def _generate_icon(self) -> QIcon:
         try:
-            ext = os.path.splitext(self.image_path)[1].lower()
-            pixmap = self._extract_raw_preview() if ext in RAW_EXTENSIONS else self._read_standard_image()
+            pixmap = generate_scaled_pixmap(self.image_path, self.thumbnail_size)
             if pixmap is None or pixmap.isNull():
                 return QIcon()
             return QIcon(pixmap)
@@ -58,40 +105,36 @@ class ThumbnailTask(QRunnable):
             print(f"Error generating thumbnail for {self.image_path}: {e}")
             return QIcon()
 
-    def _read_standard_image(self):
-        """Decodes a directly-supported image format (jpg, tiff, png, heic...)."""
-        reader = QImageReader(self.image_path)
-        original_size = reader.size()
-        if original_size.isValid():
-            # Scale to fit within a thumbnail_size x thumbnail_size box while
-            # keeping native aspect ratio -- forcing setScaledSize to a fixed
-            # square (the previous behavior) stretched/cropped every 4:3 or
-            # 3:2 frame into a square.
-            target = original_size.scaled(
-                self.thumbnail_size, self.thumbnail_size, Qt.AspectRatioMode.KeepAspectRatio
-            )
-            reader.setScaledSize(target)
-        image = reader.read()
-        if image.isNull():
-            return None
-        return QPixmap.fromImage(image)
 
-    def _extract_raw_preview(self):
-        """
-        RAW formats aren't decodable by QImageReader in a stock Qt install.
-        Instead, pull the embedded preview/thumbnail JPEG that RAW files
-        already carry, via ExifTool (which this app already depends on).
-        """
-        preview_bytes = exiftool_manager.extract_preview_bytes(self.image_path)
-        if not preview_bytes:
-            return None
-        pixmap = QPixmap()
-        if not pixmap.loadFromData(preview_bytes):
-            return None
-        return pixmap.scaled(
-            self.thumbnail_size, self.thumbnail_size,
-            Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
-        )
+class PreviewSignals(QObject):
+    """Companion QObject for PreviewTask -- see ThumbnailSignals above."""
+    finished = Signal(str, QPixmap, int)  # image_path, pixmap, generation
+
+
+class PreviewTask(QRunnable):
+    """
+    Like ThumbnailTask, but decodes a larger preview for the lightbox panel
+    instead of a filmstrip icon, and delivers a QPixmap directly rather than
+    a QIcon (the lightbox displays it in a QLabel, not a list item).
+
+    `generation` here is reused as a simple "request token": MainWindow bumps
+    it on every selection change so a slow decode for a frame the user has
+    since clicked away from doesn't land in the lightbox after the fact.
+    """
+    def __init__(self, image_path: str, generation: int, preview_size: int = 900):
+        super().__init__()
+        self.image_path = image_path
+        self.generation = generation
+        self.preview_size = preview_size
+        self.signals = PreviewSignals()
+
+    def run(self):
+        try:
+            pixmap = generate_scaled_pixmap(self.image_path, self.preview_size)
+        except Exception as e:
+            print(f"Error generating preview for {self.image_path}: {e}")
+            pixmap = None
+        self.signals.finished.emit(self.image_path, pixmap or QPixmap(), self.generation)
 
 
 class ExifWriteWorker(QObject):
